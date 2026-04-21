@@ -6,87 +6,55 @@ import { WhatsAppService } from './services/whatsapp-api.js';
 import { setupTools } from './tools/index.js';
 import { setupResources } from './resources/index.js';
 
-const SERVER_NAME = "mcp-whatsapp";
-const SERVER_VERSION = "1.0.0";
+const SERVER_NAME = 'mcp-whatsapp';
+const SERVER_VERSION = '2.0.0';
 
-async function main() {
-  console.error(`Starting ${SERVER_NAME} v${SERVER_VERSION}`);
+async function main(): Promise<void> {
+  process.stderr.write(`[${SERVER_NAME}] starting v${SERVER_VERSION}\n`);
 
-  try {
-    // Create MCP server
-    const server = new Server(
-      {
-        name: SERVER_NAME,
-        version: SERVER_VERSION,
-        description: "WhatsApp Cloud API integration for sending messages and 15MB attachments"
-      },
-      {
-        capabilities: {
-          tools: {},
-          resources: {}
-        }
-      }
-    );
+  const service = new WhatsAppService();
 
-    // Initialize WhatsApp service
-    console.error('Initializing WhatsApp service...');
-    const whatsappService = new WhatsAppService();
-    
-    // Test connection
-    console.error('Testing WhatsApp API connection...');
-    const isConnected = await whatsappService.testConnection();
-    if (!isConnected) {
-      console.error('Warning: WhatsApp API connection test failed. Check your configuration.');
-    } else {
-      console.error('✅ WhatsApp API connection successful');
+  // Fire-and-forget: Baileys connects on its own, emits QR via stderr.
+  // We don't block MCP startup — tools will wait for ready internally.
+  service.start().catch((err) => {
+    process.stderr.write(`[${SERVER_NAME}] Baileys failed to start: ${err.message}\n`);
+  });
+
+  const server = new Server(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    { capabilities: { tools: {}, resources: {} } },
+  );
+
+  setupTools(server, service);
+  setupResources(server, service);
+
+  const shutdown = async (signal: string) => {
+    process.stderr.write(`[${SERVER_NAME}] received ${signal}, shutting down\n`);
+    try {
+      await server.close();
+    } catch {
+      // ignore
     }
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-    // Setup tools and resources
-    console.error('Setting up tools and resources...');
-    setupTools(server, whatsappService);
-    setupResources(server, whatsappService);
-
-    // Handle graceful shutdown
-    process.on('SIGINT', async () => {
-      console.error('Received SIGINT, shutting down gracefully...');
-      await server.close();
-      process.exit(0);
-    });
-
-    process.on('SIGTERM', async () => {
-      console.error('Received SIGTERM, shutting down gracefully...');
-      await server.close();
-      process.exit(0);
-    });
-
-    // Start server
-    const transport = new StdioServerTransport();
-    console.error(`${SERVER_NAME} ready and listening on stdio`);
-    console.error('Available tools: send_message, send_media_message, send_document_reminder, send_billing_alert, get_message_status');
-    console.error('Available resources: whatsapp://templates, whatsapp://health, whatsapp://config');
-    
-    await server.connect(transport);
-
-  } catch (error: any) {
-    console.error('Failed to start server:', error);
-    console.error('Stack trace:', error.stack);
-    process.exit(1);
-  }
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  process.stderr.write(`[${SERVER_NAME}] ready on stdio\n`);
 }
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[${SERVER_NAME}] uncaught: ${err.stack ?? err.message}\n`);
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled rejection at:', promise, 'reason:', reason);
-  process.exit(1);
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[${SERVER_NAME}] unhandled rejection: ${String(reason)}\n`);
 });
 
-// Start the server
-main().catch((error) => {
-  console.error('Error in main:', error);
+main().catch((err) => {
+  process.stderr.write(`[${SERVER_NAME}] fatal: ${err.stack ?? err.message}\n`);
   process.exit(1);
 });

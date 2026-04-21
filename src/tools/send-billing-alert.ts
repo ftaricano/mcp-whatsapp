@@ -1,208 +1,110 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { WhatsAppService } from '../services/whatsapp-api.js';
 import { TemplateEngine } from '../services/template-engine.js';
 
 export const sendBillingAlertTool: Tool = {
-  name: "send_billing_alert",
-  description: "Enviar alerta de boleto/cobrança com dados formatados e template profissional",
+  name: 'send_billing_alert',
+  description: 'Enviar alerta de cobrança/boleto com template formatado.',
   inputSchema: {
-    type: "object",
+    type: 'object',
     properties: {
-      to: {
-        type: "string",
-        pattern: "^\\+[1-9]\\d{1,14}$",
-        description: "Número WhatsApp no formato E.164 (ex: +5511999999999)"
-      },
-      amount: {
-        type: "number",
-        minimum: 0.01,
-        description: "Valor da cobrança em reais (ex: 150.50)"
-      },
-      due_date: {
-        type: "string",
-        format: "date", 
-        description: "Data de vencimento (formato: YYYY-MM-DD)"
-      },
-      invoice_number: {
-        type: "string",
-        minLength: 1,
-        description: "Número da fatura/boleto"
-      },
-      name: {
-        type: "string",
-        description: "Nome do cliente (opcional, padrão: 'Cliente')"
-      },
-      barcode: {
-        type: "string",
-        pattern: "^[0-9]{47,48}$",
-        description: "Código de barras do boleto (opcional, 47-48 dígitos)"
-      },
-      payment_link: {
-        type: "string",
-        format: "uri",
-        description: "Link para pagamento online (opcional)"
-      },
-      company_name: {
-        type: "string",
-        description: "Nome da empresa (opcional, padrão: 'Nossa Empresa')"
-      },
+      to: { type: 'string', minLength: 8, description: 'Número WhatsApp (E.164 ou dígitos).' },
+      amount: { type: 'number', minimum: 0.01, description: 'Valor em reais.' },
+      due_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$', description: 'Vencimento (YYYY-MM-DD).' },
+      invoice_number: { type: 'string', minLength: 1, description: 'Número da fatura/boleto.' },
+      name: { type: 'string', description: 'Nome do cliente (opcional).' },
+      barcode: { type: 'string', pattern: '^[0-9]{47,48}$', description: 'Código de barras (47-48 dígitos, opcional).' },
+      payment_link: { type: 'string', format: 'uri', description: 'Link de pagamento (opcional).' },
+      company_name: { type: 'string', description: 'Nome da empresa (opcional).' },
       include_interest_info: {
-        type: "boolean",
+        type: 'boolean',
         default: false,
-        description: "Incluir informações sobre juros e multa em caso de atraso"
-      }
+        description: 'Anexar aviso de juros/multa.',
+      },
     },
-    required: ["to", "amount", "due_date", "invoice_number"]
-  }
+    required: ['to', 'amount', 'due_date', 'invoice_number'],
+  },
 };
 
-export async function handleSendBillingAlert(
-  whatsappService: WhatsAppService,
-  args: any
-): Promise<any> {
+const schema = z.object({
+  to: z.string().min(8),
+  amount: z.number().positive(),
+  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  invoice_number: z.string().min(1),
+  name: z.string().optional(),
+  barcode: z.string().regex(/^[0-9]{47,48}$/).optional(),
+  payment_link: z.string().url().optional(),
+  company_name: z.string().optional(),
+  include_interest_info: z.boolean().optional().default(false),
+});
+
+export async function handleSendBillingAlert(service: WhatsAppService, args: unknown): Promise<unknown> {
+  const parsed = schema.safeParse(args);
+  if (!parsed.success) {
+    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
+  }
+  const data = parsed.data;
+
+  const dueDate = new Date(data.due_date);
+  if (Number.isNaN(dueDate.getTime())) {
+    return { success: false, error: { type: 'validation_error', message: `Data inválida: ${data.due_date}` } };
+  }
+
+  let messageText = TemplateEngine.createBillingAlertMessage({
+    name: data.name,
+    invoice_number: data.invoice_number,
+    amount: data.amount,
+    due_date: data.due_date,
+    payment_link: data.payment_link,
+    barcode: data.barcode,
+    company_name: data.company_name,
+  });
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysUntilDue = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (data.include_interest_info && daysUntilDue >= 0) {
+    messageText += `\n\n⚠️ *Importante:* Após o vencimento, incidirão juros de 1% ao mês e multa de 2%.`;
+  }
+
   try {
-    // Validate required parameters
-    if (!args.to || !args.amount || !args.due_date || !args.invoice_number) {
-      throw new Error('Parâmetros obrigatórios: to, amount, due_date, invoice_number');
-    }
+    const sent = await service.sendMessage({ to: data.to, message: messageText });
 
-    // Validate phone number format
-    if (!args.to.match(/^\+[1-9]\d{1,14}$/)) {
-      throw new Error(`Número de telefone inválido: ${args.to}. Use o formato E.164 (ex: +5511999999999)`);
-    }
-
-    // Validate amount
-    if (typeof args.amount !== 'number' || args.amount <= 0) {
-      throw new Error(`Valor inválido: ${args.amount}. Deve ser um número positivo`);
-    }
-
-    // Validate date format
-    const dueDateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dueDateRegex.test(args.due_date)) {
-      throw new Error(`Formato de data inválido: ${args.due_date}. Use o formato YYYY-MM-DD`);
-    }
-
-    const dueDate = new Date(args.due_date);
-    if (isNaN(dueDate.getTime())) {
-      throw new Error(`Data inválida: ${args.due_date}`);
-    }
-
-    // Validate invoice number
-    if (!args.invoice_number.trim()) {
-      throw new Error('Número da fatura não pode estar vazio');
-    }
-
-    // Validate barcode if provided
-    if (args.barcode && !args.barcode.match(/^[0-9]{47,48}$/)) {
-      throw new Error(`Código de barras inválido: ${args.barcode}. Deve conter 47 ou 48 dígitos numéricos`);
-    }
-
-    // Validate payment link if provided
-    if (args.payment_link) {
-      try {
-        new URL(args.payment_link);
-      } catch {
-        throw new Error(`Link de pagamento inválido: ${args.payment_link}`);
-      }
-    }
-
-    console.log(`Sending billing alert to ${args.to} for invoice ${args.invoice_number} (R$ ${args.amount})`);
-
-    // Generate message using template
-    const messageText = TemplateEngine.createBillingAlertMessage({
-      name: args.name,
-      invoice_number: args.invoice_number,
-      amount: args.amount,
-      due_date: args.due_date,
-      payment_link: args.payment_link,
-      barcode: args.barcode,
-      company_name: args.company_name
-    });
-
-    // Add interest information if requested
-    let finalMessage = messageText;
-    if (args.include_interest_info) {
-      const today = new Date();
-      const diffTime = dueDate.getTime() - today.getTime();
-      const daysUntilDue = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-      if (daysUntilDue >= 0) {
-        finalMessage += `\n\n⚠️ *Importante:* Após o vencimento, incidirão juros de 1% ao mês e multa de 2%.`;
-      }
-    }
-
-    const messageResponse = await whatsappService.sendMessage({
-      to: args.to,
-      message: finalMessage
-    });
-
-    // Calculate billing status
-    const today = new Date();
-    const diffTime = dueDate.getTime() - today.getTime();
-    const daysUntilDue = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    let billingStatus: string;
-    if (daysUntilDue > 0) {
-      billingStatus = 'pending';
-    } else if (daysUntilDue === 0) {
-      billingStatus = 'due_today';
-    } else {
-      billingStatus = 'overdue';
-    }
-
-    // Extract relevant information from response
-    const messageId = messageResponse.messages?.[0]?.id;
-    const contactWaId = messageResponse.contacts?.[0]?.wa_id;
+    const status =
+      daysUntilDue > 0 ? 'pending' : daysUntilDue === 0 ? 'due_today' : 'overdue';
 
     return {
       success: true,
-      message_id: messageId,
-      contact_wa_id: contactWaId,
-      to: args.to,
+      message_id: sent.message_id,
+      to_jid: sent.to_jid,
+      status: sent.status,
       billing_details: {
-        invoice_number: args.invoice_number,
-        amount: args.amount,
-        amount_formatted: new Intl.NumberFormat('pt-BR', {
-          style: 'currency',
-          currency: 'BRL'
-        }).format(args.amount),
-        due_date: args.due_date,
+        invoice_number: data.invoice_number,
+        amount: data.amount,
+        amount_formatted: new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(data.amount),
+        due_date: data.due_date,
         days_until_due: daysUntilDue,
-        status: billingStatus,
-        recipient_name: args.name || 'Cliente',
-        company_name: args.company_name || 'Nossa Empresa',
-        has_barcode: !!args.barcode,
-        has_payment_link: !!args.payment_link,
-        includes_interest_info: args.include_interest_info || false
+        billing_status: status,
+        recipient_name: data.name ?? 'Cliente',
+        company_name: data.company_name ?? 'Nossa Empresa',
+        has_barcode: !!data.barcode,
+        has_payment_link: !!data.payment_link,
       },
       payment_options: {
-        barcode: args.barcode || null,
-        payment_link: args.payment_link || null
+        barcode: data.barcode ?? null,
+        payment_link: data.payment_link ?? null,
       },
-      message_length: finalMessage.length,
-      timestamp: new Date().toISOString(),
-      details: {
-        messaging_product: messageResponse.messaging_product,
-        status: "sent"
-      }
+      message_length: messageText.length,
+      timestamp: sent.timestamp,
     };
-
-  } catch (error: any) {
-    console.error('Error sending billing alert:', error);
-    
+  } catch (err) {
     return {
       success: false,
-      error: {
-        message: error.message,
-        type: error.response?.status ? 'api_error' : 'validation_error',
-        status_code: error.response?.status,
-        details: error.response?.data || null
-      },
-      to: args.to,
-      invoice_number: args.invoice_number,
-      amount: args.amount,
-      due_date: args.due_date,
-      timestamp: new Date().toISOString()
+      error: { type: 'send_failed', message: (err as Error).message },
+      to: data.to,
+      timestamp: new Date().toISOString(),
     };
   }
 }

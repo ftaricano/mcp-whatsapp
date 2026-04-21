@@ -30,7 +30,8 @@ Thumbs.db
 coverage/
 .nyc_output/
 
-# WhatsApp specific
+# WhatsApp specific — NEVER commit the auth state
 .wwebjs_auth/
+auth-state/
 session.json
 tokens.json
