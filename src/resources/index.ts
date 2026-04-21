@@ -35,6 +35,12 @@ const RESOURCES = [
     description: 'Status das mensagens enviadas nesta sessão.',
     mimeType: 'application/json',
   },
+  {
+    uri: 'whatsapp://inbox',
+    name: 'Inbox Overview',
+    description: 'Resumo dos chats com atividade desde o start do servidor (buffer em memória).',
+    mimeType: 'application/json',
+  },
 ] as const;
 
 export function setupResources(server: Server, service: WhatsAppService): void {
@@ -121,6 +127,12 @@ async function readResource(uri: string, service: WhatsAppService): Promise<unkn
 
     case 'whatsapp://statuses':
       return { statuses: service.getAllStatuses() };
+
+    case 'whatsapp://inbox': {
+      const overview = service.getInboxOverview();
+      const chats = service.listChats(50);
+      return { overview, chats };
+    }
 
     default:
       return {
