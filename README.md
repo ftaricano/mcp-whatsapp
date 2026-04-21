@@ -1,6 +1,6 @@
 # mcp-whatsapp
 
-MCP (Model Context Protocol) server para WhatsApp, **autenticado via QR code** (Baileys). Sem token oficial da Meta, sem aprovação de Business account — usa a mesma sessão do WhatsApp Web. Ideal para disparo controlado de mensagens, lembretes de documentos e alertas de cobrança pra contatos que já te conhecem.
+MCP (Model Context Protocol) server para WhatsApp, **autenticado via QR code** (Baileys). Sem token oficial da Meta, sem aprovação de Business account — usa a mesma sessão do WhatsApp Web. Funciona com **WhatsApp pessoal ou Business** (qualquer conta que pareia em "Aparelhos conectados"). Ideal para disparo controlado de mensagens, lembretes de documentos e alertas de cobrança pra contatos que já te conhecem.
 
 > ⚠️ **Uso responsável.** WhatsApp bane números por comportamento de spam, não por "biblioteca usada". Mantenha volume moderado (o rate limiter default é 2 msg/s), não mande pra quem não te conhece, e respeite opt-outs. Para disparo em massa de campanhas, use a Cloud API oficial.
 
