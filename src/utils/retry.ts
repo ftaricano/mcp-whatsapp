@@ -1,11 +1,12 @@
+import { Boom } from '@hapi/boom';
+
 export enum ErrorCategory {
-  RATE_LIMIT = "rate_limit",
-  NETWORK = "network", 
-  INVALID_REQUEST = "invalid",
-  UNAUTHORIZED = "auth",
-  MEDIA_ERROR = "media",
-  QUOTA_EXCEEDED = "quota",
-  UNKNOWN = "unknown"
+  RATE_LIMIT = 'rate_limit',
+  NETWORK = 'network',
+  INVALID_REQUEST = 'invalid',
+  UNAUTHORIZED = 'auth',
+  NOT_FOUND = 'not_found',
+  UNKNOWN = 'unknown',
 }
 
 export interface RetryConfig {
@@ -13,7 +14,7 @@ export interface RetryConfig {
   baseDelay: number;
   maxDelay: number;
   backoffMultiplier: number;
-  shouldRetry: (error: any) => boolean;
+  shouldRetry: (error: unknown) => boolean;
 }
 
 export class RetryHandler {
@@ -21,78 +22,67 @@ export class RetryHandler {
 
   constructor(config: Partial<RetryConfig> = {}) {
     this.config = {
-      maxRetries: config.maxRetries || 3,
-      baseDelay: config.baseDelay || 1000,
-      maxDelay: config.maxDelay || 30000,
-      backoffMultiplier: config.backoffMultiplier || 2,
-      shouldRetry: config.shouldRetry || this.defaultShouldRetry
+      maxRetries: config.maxRetries ?? 3,
+      baseDelay: config.baseDelay ?? 1000,
+      maxDelay: config.maxDelay ?? 30000,
+      backoffMultiplier: config.backoffMultiplier ?? 2,
+      shouldRetry: config.shouldRetry ?? defaultShouldRetry,
     };
   }
 
-  public async execute<T>(operation: () => Promise<T>): Promise<T> {
-    let lastError: any;
-    
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
       try {
         return await operation();
-      } catch (error) {
-        lastError = error;
-        
-        if (attempt === this.config.maxRetries || !this.config.shouldRetry(error as any)) {
-          break;
-        }
-
-        const delay = this.calculateDelay(attempt, error as any);
-        console.warn(`Attempt ${attempt + 1} failed, retrying in ${delay}ms:`, (error as any)?.message);
-        await this.sleep(delay);
+      } catch (err) {
+        lastError = err;
+        if (attempt === this.config.maxRetries || !this.config.shouldRetry(err)) break;
+        const delay = this.calculateDelay(attempt, err);
+        await sleep(delay);
       }
     }
-
     throw lastError;
   }
 
-  private calculateDelay(attempt: number, error: any): number {
-    const category = this.categorizeError(error);
-    
-    // Rate limit errors should use longer delays
+  private calculateDelay(attempt: number, err: unknown): number {
+    const category = categorizeError(err);
     const multiplier = category === ErrorCategory.RATE_LIMIT ? 2 : 1;
-    
-    const exponentialDelay = this.config.baseDelay * Math.pow(this.config.backoffMultiplier, attempt);
-    const delay = Math.min(exponentialDelay * multiplier, this.config.maxDelay);
-    
-    // Add jitter to prevent thundering herd
-    return delay + Math.random() * 1000;
+    const base = this.config.baseDelay * Math.pow(this.config.backoffMultiplier, attempt);
+    const capped = Math.min(base * multiplier, this.config.maxDelay);
+    return capped + Math.random() * 500;
   }
+}
 
-  private categorizeError(error: any): ErrorCategory {
-    if (error.response?.status === 429) return ErrorCategory.RATE_LIMIT;
-    if (error.response?.status === 401) return ErrorCategory.UNAUTHORIZED;
-    if (error.response?.status >= 400 && error.response?.status < 500) return ErrorCategory.INVALID_REQUEST;
-    if (error.code === 'ECONNABORTED' || error.code === 'ENOTFOUND') return ErrorCategory.NETWORK;
-    if (error.message?.includes('media')) return ErrorCategory.MEDIA_ERROR;
-    if (error.response?.status === 429) return ErrorCategory.QUOTA_EXCEEDED;
-    
-    return ErrorCategory.UNKNOWN;
-  }
+export function categorizeError(err: unknown): ErrorCategory {
+  const boom = err as Boom | undefined;
+  const status = boom?.output?.statusCode;
 
-  private defaultShouldRetry(error: unknown): boolean {
-    const category = this.categorizeError(error as any);
-    
-    // Don't retry client errors (4xx except 429)
-    if (category === ErrorCategory.INVALID_REQUEST) return false;
-    if (category === ErrorCategory.UNAUTHORIZED) return false;
-    
-    // Retry these categories
-    return [
-      ErrorCategory.RATE_LIMIT,
-      ErrorCategory.NETWORK,
-      ErrorCategory.MEDIA_ERROR,
-      ErrorCategory.QUOTA_EXCEEDED,
-      ErrorCategory.UNKNOWN
-    ].includes(category);
-  }
+  if (status === 429) return ErrorCategory.RATE_LIMIT;
+  if (status === 401 || status === 403) return ErrorCategory.UNAUTHORIZED;
+  if (status === 404) return ErrorCategory.NOT_FOUND;
+  if (typeof status === 'number' && status >= 400 && status < 500) return ErrorCategory.INVALID_REQUEST;
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  const msg = (err as Error | undefined)?.message?.toLowerCase() ?? '';
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'ECONNABORTED' || code === 'ENOTFOUND') {
+    return ErrorCategory.NETWORK;
   }
+  if (msg.includes('timed out') || msg.includes('connection closed') || msg.includes('stream errored')) {
+    return ErrorCategory.NETWORK;
+  }
+  return ErrorCategory.UNKNOWN;
+}
+
+function defaultShouldRetry(err: unknown): boolean {
+  const category = categorizeError(err);
+  if (category === ErrorCategory.INVALID_REQUEST) return false;
+  if (category === ErrorCategory.UNAUTHORIZED) return false;
+  if (category === ErrorCategory.NOT_FOUND) return false;
+  return true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }

@@ -1,13 +1,25 @@
-import axios, { AxiosResponse } from 'axios';
-import FormData from 'form-data';
-import { createReadStream, promises as fs } from 'fs';
+import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as mime from 'mime-types';
+import { Boom } from '@hapi/boom';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  WAMessageKey,
+  WASocket,
+  proto,
+} from '@whiskeysockets/baileys';
+import pino, { Logger } from 'pino';
+import qrcodeTerminal from 'qrcode-terminal';
+import QRCode from 'qrcode';
 
 import { ConfigManager } from '../config/whatsapp.js';
 import { RateLimiter } from '../utils/rate-limiter.js';
 import { RetryHandler } from '../utils/retry.js';
 import { CircuitBreaker } from '../utils/circuit-breaker.js';
+
+export type MediaType = 'image' | 'document' | 'audio' | 'video';
 
 export interface SendMessageParams {
   to: string;
@@ -18,196 +30,308 @@ export interface SendMessageParams {
 export interface SendMediaParams {
   to: string;
   mediaPath: string;
-  mediaType: 'image' | 'document' | 'audio' | 'video';
+  mediaType: MediaType;
   caption?: string;
   filename?: string;
 }
 
-export interface MessageResponse {
-  messaging_product: string;
-  contacts: Array<{
-    input: string;
-    wa_id: string;
-  }>;
-  messages: Array<{
-    id: string;
-    message_status?: string;
-  }>;
+export interface SentMessage {
+  message_id: string;
+  to_jid: string;
+  timestamp: string;
+  status: MessageStatus;
 }
 
-export interface MediaUploadResponse {
-  id: string;
-  url?: string;
+export type MessageStatus = 'pending' | 'server_ack' | 'delivered' | 'read' | 'played' | 'error';
+
+export type ConnectionState = 'disconnected' | 'connecting' | 'qr' | 'open' | 'logged_out';
+
+interface StatusEntry {
+  status: MessageStatus;
+  updatedAt: string;
+  to_jid: string;
 }
 
 export class WhatsAppService {
   private readonly config = ConfigManager.getInstance();
+  private readonly logger: Logger;
   private readonly messageLimiter: RateLimiter;
   private readonly mediaLimiter: RateLimiter;
-  private readonly circuitBreaker = new CircuitBreaker();
-  private readonly retryHandler = new RetryHandler();
+  private readonly circuitBreaker: CircuitBreaker;
+  private readonly retryHandler: RetryHandler;
+
+  private sock: WASocket | null = null;
+  private saveCreds: (() => Promise<void>) | null = null;
+  private connectionState: ConnectionState = 'disconnected';
+  private currentQr: string | null = null;
+  private currentQrGeneratedAt: number | null = null;
+  private me: { id: string; name?: string } | null = null;
+  private readonly statusMap = new Map<string, StatusEntry>();
+  private readyWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+  private manualLogout = false;
 
   constructor() {
     const cfg = this.config.getConfig();
-    this.messageLimiter = new RateLimiter(
-      cfg.rateLimit.messagesPerSecond,
-      cfg.rateLimit.burstLimit
-    );
-    this.mediaLimiter = new RateLimiter(
-      cfg.rateLimit.mediaPerSecond,
-      cfg.rateLimit.burstLimit
-    );
-  }
-
-  public async sendMessage(params: SendMessageParams): Promise<MessageResponse> {
-    this.validatePhoneNumber(params.to);
-    
-    return this.circuitBreaker.execute(async () => {
-      await this.messageLimiter.wait();
-      
-      return this.retryHandler.execute(async () => {
-        const response = await axios.post(
-          `${this.config.getApiUrl()}/messages`,
-          {
-            messaging_product: "whatsapp",
-            to: params.to,
-            type: "text",
-            text: { 
-              body: params.message,
-              preview_url: params.preview_url || false
-            }
-          },
-          {
-            headers: this.config.getHeaders(),
-            timeout: 10000
-          }
-        );
-        
-        return this.transformResponse(response);
-      });
+    this.logger = pino({ level: cfg.logLevel }).child({ mod: 'whatsapp' });
+    this.messageLimiter = new RateLimiter(cfg.rateLimit.messagesPerSecond, cfg.rateLimit.burstLimit);
+    this.mediaLimiter = new RateLimiter(cfg.rateLimit.mediaPerSecond, cfg.rateLimit.burstLimit);
+    this.circuitBreaker = new CircuitBreaker();
+    this.retryHandler = new RetryHandler({
+      maxRetries: cfg.retryPolicy.maxRetries,
+      baseDelay: cfg.retryPolicy.baseDelay,
+      maxDelay: cfg.retryPolicy.maxDelay,
+      backoffMultiplier: cfg.retryPolicy.backoffMultiplier,
     });
   }
 
-  public async sendMediaMessage(params: SendMediaParams): Promise<MessageResponse> {
-    this.validatePhoneNumber(params.to);
-    await this.validateMediaFile(params.mediaPath);
-    
-    return this.circuitBreaker.execute(async () => {
-      await this.mediaLimiter.wait();
-      
-      return this.retryHandler.execute(async () => {
-        // First upload the media
-        const mediaId = await this.uploadMedia(params.mediaPath);
-        
-        // Then send the message with media
-        const mediaPayload = this.buildMediaPayload(params, mediaId);
-        
-        const response = await axios.post(
-          `${this.config.getApiUrl()}/messages`,
-          {
-            messaging_product: "whatsapp",
-            to: params.to,
-            type: params.mediaType,
-            ...mediaPayload
-          },
-          {
-            headers: this.config.getHeaders(),
-            timeout: 30000 // Longer timeout for media
-          }
-        );
-        
-        return this.transformResponse(response);
-      });
-    });
-  }
-
-  public async uploadMedia(filePath: string): Promise<string> {
-    const fileSize = await this.getFileSize(filePath);
+  async start(): Promise<void> {
     const cfg = this.config.getConfig();
-    
-    if (fileSize > cfg.media.maxSize) {
-      throw new Error(`File size ${fileSize} exceeds maximum allowed size ${cfg.media.maxSize}`);
-    }
+    await fs.mkdir(cfg.sessionDir, { recursive: true });
+    const { state, saveCreds } = await useMultiFileAuthState(cfg.sessionDir);
+    this.saveCreds = saveCreds;
 
-    // For files larger than 5MB, use resumable upload
-    if (fileSize > 5 * 1024 * 1024) {
-      return this.resumableUpload(filePath);
-    }
-    
-    return this.standardUpload(filePath);
-  }
+    const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({
+      version: [2, 3000, 0] as [number, number, number],
+      isLatest: false,
+    }));
+    this.logger.info({ version, isLatest }, 'Starting Baileys socket');
 
-  private async standardUpload(filePath: string): Promise<string> {
-    const formData = new FormData();
-    const mimeType = mime.lookup(filePath) || 'application/octet-stream';
-    
-    formData.append('file', createReadStream(filePath), {
-      filename: path.basename(filePath),
-      contentType: mimeType
+    this.connectionState = 'connecting';
+    this.sock = makeWASocket({
+      auth: state,
+      version,
+      logger: this.logger.child({ mod: 'baileys' }) as any,
+      printQRInTerminal: false,
+      browser: ['mcp-whatsapp', 'Chrome', '2.0.0'],
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
     });
-    formData.append('messaging_product', 'whatsapp');
 
-    const response = await axios.post(
-      `${this.config.getApiUrl()}/media`,
-      formData,
-      {
-        headers: {
-          ...this.config.getHeaders(),
-          ...formData.getHeaders()
-        },
-        timeout: 60000,
-        maxContentLength: this.config.getConfig().media.maxSize,
-        maxBodyLength: this.config.getConfig().media.maxSize
+    this.sock.ev.on('creds.update', saveCreds);
+    this.sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(update));
+    this.sock.ev.on('messages.update', (updates) => this.handleMessageUpdates(updates));
+  }
+
+  private async handleConnectionUpdate(update: {
+    connection?: 'open' | 'close' | 'connecting';
+    qr?: string;
+    lastDisconnect?: { error: Error | undefined; date: Date };
+  }): Promise<void> {
+    const { connection, qr, lastDisconnect } = update;
+
+    if (qr) {
+      this.currentQr = qr;
+      this.currentQrGeneratedAt = Date.now();
+      this.connectionState = 'qr';
+      this.logger.info('QR code generated — scan from WhatsApp → Linked Devices');
+      qrcodeTerminal.generate(qr, { small: true }, (ascii) => {
+        process.stderr.write('\n' + ascii + '\n');
+      });
+    }
+
+    if (connection === 'open') {
+      this.currentQr = null;
+      this.connectionState = 'open';
+      this.me = this.sock?.user ? { id: this.sock.user.id, name: this.sock.user.name } : null;
+      this.logger.info({ me: this.me }, 'Connection OPEN');
+      this.flushReadyWaiters();
+    }
+
+    if (connection === 'close') {
+      const boom = lastDisconnect?.error as Boom | undefined;
+      const statusCode = boom?.output?.statusCode;
+      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      this.logger.warn({ statusCode, loggedOut, manual: this.manualLogout }, 'Connection closed');
+
+      if (loggedOut || this.manualLogout) {
+        this.connectionState = 'logged_out';
+        this.rejectReadyWaiters(new Error('Logged out — scan QR again via `npm start`'));
+        return;
       }
-    );
 
-    return response.data.id;
+      this.connectionState = 'connecting';
+      setTimeout(() => {
+        this.start().catch((err) => this.logger.error({ err }, 'Reconnect failed'));
+      }, 2000);
+    }
   }
 
-  private async resumableUpload(filePath: string): Promise<string> {
-    // For large files, implement chunked upload
-    // This is a simplified version - production should implement proper resumable upload
-    console.warn('Large file detected, using standard upload. Consider implementing resumable upload for production.');
-    return this.standardUpload(filePath);
+  private handleMessageUpdates(updates: Array<{ key: WAMessageKey; update: Partial<proto.IWebMessageInfo> }>): void {
+    for (const { key, update } of updates) {
+      const id = key.id;
+      if (!id) continue;
+      const existing = this.statusMap.get(id);
+      if (!existing) continue;
+      const statusCode = update.status;
+      if (statusCode === undefined || statusCode === null) continue;
+      const mapped = mapProtoStatus(statusCode);
+      if (mapped) {
+        this.statusMap.set(id, { ...existing, status: mapped, updatedAt: new Date().toISOString() });
+      }
+    }
   }
 
-  public async getMessageStatus(messageId: string): Promise<any> {
-    return this.circuitBreaker.execute(async () => {
-      return this.retryHandler.execute(async () => {
-        const response = await axios.get(
-          `${this.config.getApiUrl()}/messages/${messageId}`,
-          {
-            headers: this.config.getHeaders(),
-            timeout: 10000
-          }
-        );
-        
-        return response.data;
+  private flushReadyWaiters(): void {
+    const waiters = this.readyWaiters;
+    this.readyWaiters = [];
+    for (const w of waiters) w.resolve();
+  }
+
+  private rejectReadyWaiters(err: Error): void {
+    const waiters = this.readyWaiters;
+    this.readyWaiters = [];
+    for (const w of waiters) w.reject(err);
+  }
+
+  /**
+   * Wait until the connection is open. Throws if the connection enters
+   * logged_out state or the timeout elapses. The QR state is NOT an error —
+   * the caller just needs to scan it.
+   */
+  waitReady(timeoutMs = 120_000): Promise<void> {
+    if (this.connectionState === 'open') return Promise.resolve();
+    if (this.connectionState === 'logged_out') {
+      return Promise.reject(new Error('Logged out — re-pair required'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.readyWaiters = this.readyWaiters.filter((w) => w.resolve !== resolve);
+        reject(new Error(`Timed out after ${timeoutMs}ms waiting for WhatsApp connection (state=${this.connectionState})`));
+      }, timeoutMs);
+      this.readyWaiters.push({
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
       });
     });
   }
 
-  public async testConnection(): Promise<boolean> {
-    try {
-      const response = await axios.get(
-        `${this.config.getApiUrl()}`,
-        {
-          headers: this.config.getHeaders(),
-          timeout: 5000
-        }
-      );
-      
-      return response.status === 200;
-    } catch (error) {
-      console.error('WhatsApp API connection test failed:', error);
-      return false;
-    }
+  async sendMessage(params: SendMessageParams): Promise<SentMessage> {
+    await this.ensureReady();
+    const jid = this.config.normalizeJid(params.to);
+    validateText(params.message);
+
+    return this.circuitBreaker.execute(() =>
+      this.retryHandler.execute(async () => {
+        await this.messageLimiter.wait();
+        const content: any = { text: params.message };
+        if (!params.preview_url) content.linkPreview = null;
+        const sent = await this.requireSocket().sendMessage(jid, content);
+        return this.recordSent(sent, jid);
+      }),
+    );
   }
 
-  private validatePhoneNumber(phone: string): void {
-    if (!this.config.isValidPhoneNumber(phone)) {
-      throw new Error(`Invalid phone number format: ${phone}. Must be in E.164 format (e.g., +5511999999999)`);
+  async sendMediaMessage(params: SendMediaParams): Promise<SentMessage> {
+    await this.ensureReady();
+    const jid = this.config.normalizeJid(params.to);
+    await this.validateMediaFile(params.mediaPath);
+
+    const mimeType = (mime.lookup(params.mediaPath) || 'application/octet-stream').toString();
+    const filename = params.filename || path.basename(params.mediaPath);
+    const buffer = await fs.readFile(params.mediaPath);
+
+    return this.circuitBreaker.execute(() =>
+      this.retryHandler.execute(async () => {
+        await this.mediaLimiter.wait();
+        const content = buildMediaContent(params.mediaType, buffer, mimeType, filename, params.caption);
+        const sent = await this.requireSocket().sendMessage(jid, content);
+        return this.recordSent(sent, jid);
+      }),
+    );
+  }
+
+  getMessageStatus(messageId: string): StatusEntry | undefined {
+    return this.statusMap.get(messageId);
+  }
+
+  getAllStatuses(): Array<{ message_id: string } & StatusEntry> {
+    return [...this.statusMap.entries()].map(([id, e]) => ({ message_id: id, ...e }));
+  }
+
+  async logout(): Promise<void> {
+    this.manualLogout = true;
+    try {
+      await this.sock?.logout();
+    } catch (err) {
+      this.logger.warn({ err }, 'Error during logout, clearing state anyway');
     }
+    const cfg = this.config.getConfig();
+    await fs.rm(cfg.sessionDir, { recursive: true, force: true });
+    this.connectionState = 'logged_out';
+    this.currentQr = null;
+    this.me = null;
+    this.statusMap.clear();
+    this.logger.info('Logged out and session cleared');
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
+  }
+
+  getCurrentQr(): { qr: string; generatedAt: string } | null {
+    if (!this.currentQr || !this.currentQrGeneratedAt) return null;
+    return { qr: this.currentQr, generatedAt: new Date(this.currentQrGeneratedAt).toISOString() };
+  }
+
+  async getCurrentQrAsDataUrl(): Promise<string | null> {
+    if (!this.currentQr) return null;
+    return QRCode.toDataURL(this.currentQr, { width: 300, margin: 1 });
+  }
+
+  getMe(): { id: string; name?: string } | null {
+    return this.me;
+  }
+
+  getHealth(): {
+    connection: ConnectionState;
+    me: { id: string; name?: string } | null;
+    circuitBreaker: ReturnType<CircuitBreaker['getMetrics']>;
+    rateLimiter: { messages: ReturnType<RateLimiter['getStatus']>; media: ReturnType<RateLimiter['getStatus']> };
+    pendingMessages: number;
+  } {
+    return {
+      connection: this.connectionState,
+      me: this.me,
+      circuitBreaker: this.circuitBreaker.getMetrics(),
+      rateLimiter: {
+        messages: this.messageLimiter.getStatus(),
+        media: this.mediaLimiter.getStatus(),
+      },
+      pendingMessages: [...this.statusMap.values()].filter((s) => s.status === 'pending' || s.status === 'server_ack').length,
+    };
+  }
+
+  private requireSocket(): WASocket {
+    if (!this.sock) throw new Error('Socket not initialized — call start() first');
+    return this.sock;
+  }
+
+  private async ensureReady(): Promise<void> {
+    if (this.connectionState === 'open') return;
+    if (this.connectionState === 'logged_out') {
+      throw new Error('WhatsApp is logged out. Restart the server and scan the QR code.');
+    }
+    await this.waitReady(15_000).catch((err) => {
+      throw new Error(`WhatsApp not ready: ${err.message}`);
+    });
+  }
+
+  private recordSent(sent: proto.WebMessageInfo | undefined, jid: string): SentMessage {
+    if (!sent || !sent.key?.id) throw new Error('Send failed: no message ID returned');
+    const id = sent.key.id;
+    const entry: StatusEntry = {
+      status: 'pending',
+      updatedAt: new Date().toISOString(),
+      to_jid: jid,
+    };
+    this.statusMap.set(id, entry);
+    return { message_id: id, to_jid: jid, timestamp: entry.updatedAt, status: 'pending' };
   }
 
   private async validateMediaFile(filePath: string): Promise<void> {
@@ -216,75 +340,56 @@ export class WhatsAppService {
     } catch {
       throw new Error(`File not found: ${filePath}`);
     }
-
-    const mimeType = mime.lookup(filePath);
-    if (!mimeType || !this.config.isAllowedMediaType(mimeType)) {
-      throw new Error(`Unsupported media type: ${mimeType}`);
+    const mimeType = (mime.lookup(filePath) || '').toString();
+    if (!mimeType || !this.config.isAllowedMimeType(mimeType)) {
+      throw new Error(`Unsupported media type: "${mimeType || 'unknown'}" for ${filePath}`);
     }
-
-    const fileSize = await this.getFileSize(filePath);
-    const maxSize = this.config.getConfig().media.maxSize;
-    
-    if (fileSize > maxSize) {
-      throw new Error(`File size ${fileSize} exceeds maximum allowed size ${maxSize}`);
+    const stat = await fs.stat(filePath);
+    const max = this.config.getConfig().media.maxSize;
+    if (stat.size > max) {
+      throw new Error(`File too large: ${stat.size} bytes (max ${max})`);
     }
   }
+}
 
-  private async getFileSize(filePath: string): Promise<number> {
-    const stats = await fs.stat(filePath);
-    return stats.size;
+function validateText(text: string): void {
+  if (typeof text !== 'string' || text.trim().length === 0) {
+    throw new Error('Message must be a non-empty string');
   }
-
-  private buildMediaPayload(params: SendMediaParams, mediaId: string): any {
-    const payload: any = {};
-    
-    switch (params.mediaType) {
-      case 'image':
-        payload.image = { id: mediaId };
-        if (params.caption) payload.image.caption = params.caption;
-        break;
-      case 'document':
-        payload.document = { 
-          id: mediaId,
-          filename: params.filename || path.basename(params.mediaPath)
-        };
-        if (params.caption) payload.document.caption = params.caption;
-        break;
-      case 'audio':
-        payload.audio = { id: mediaId };
-        break;
-      case 'video':
-        payload.video = { id: mediaId };
-        if (params.caption) payload.video.caption = params.caption;
-        break;
-    }
-    
-    return payload;
+  if (text.length > 4096) {
+    throw new Error(`Message too long: ${text.length} (max 4096)`);
   }
+}
 
-  private transformResponse(response: AxiosResponse): MessageResponse {
-    return {
-      messaging_product: response.data.messaging_product,
-      contacts: response.data.contacts || [],
-      messages: response.data.messages || []
-    };
+function buildMediaContent(
+  type: MediaType,
+  buffer: Buffer,
+  mimeType: string,
+  filename: string,
+  caption?: string,
+): any {
+  switch (type) {
+    case 'image':
+      return { image: buffer, caption, mimetype: mimeType };
+    case 'document':
+      return { document: buffer, fileName: filename, mimetype: mimeType, caption };
+    case 'audio':
+      return { audio: buffer, mimetype: mimeType, ptt: false };
+    case 'video':
+      return { video: buffer, caption, mimetype: mimeType };
   }
+}
 
-  public getHealthStatus(): {
-    isHealthy: boolean;
-    circuitBreaker: any;
-    rateLimiter: {
-      messages: any;
-      media: any;
-    };
-  } {
-    return {
-      isHealthy: this.circuitBreaker.getState() === 'closed',
-      circuitBreaker: this.circuitBreaker.getMetrics(),
-      rateLimiter: {
-        messages: this.messageLimiter.getStatus(),
-        media: this.mediaLimiter.getStatus()
-      }
-    };
+function mapProtoStatus(status: proto.WebMessageInfo.Status | number | null | undefined): MessageStatus | null {
+  if (status === null || status === undefined) return null;
+  // 0 ERROR, 1 PENDING, 2 SERVER_ACK, 3 DELIVERY_ACK, 4 READ, 5 PLAYED
+  switch (status) {
+    case 0: return 'error';
+    case 1: return 'pending';
+    case 2: return 'server_ack';
+    case 3: return 'delivered';
+    case 4: return 'read';
+    case 5: return 'played';
+    default: return null;
   }
 }

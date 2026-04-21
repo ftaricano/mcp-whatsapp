@@ -1,138 +1,103 @@
-export interface WhatsAppConfig {
-  // Authentication (required)
-  accessToken: string;
-  phoneNumberId: string;
-  
-  // API settings
-  apiVersion: string;
-  baseUrl: string;
-  
-  // Rate limiting
-  rateLimit: {
-    messagesPerSecond: number;
-    mediaPerSecond: number;
-    burstLimit: number;
-  };
-  
-  // Retry policy
-  retryPolicy: {
-    maxRetries: number;
-    baseDelay: number;
-    maxDelay: number;
-    backoffMultiplier: number;
-  };
-  
-  // Media handling
-  media: {
-    maxSize: number;
-    allowedTypes: string[];
-    compressionEnabled: boolean;
-    tempDir: string;
-  };
+import * as path from 'path';
+import { z } from 'zod';
+
+const ConfigSchema = z.object({
+  sessionDir: z.string(),
+  rateLimit: z.object({
+    messagesPerSecond: z.number().positive(),
+    mediaPerSecond: z.number().positive(),
+    burstLimit: z.number().positive(),
+  }),
+  retryPolicy: z.object({
+    maxRetries: z.number().int().min(0),
+    baseDelay: z.number().int().positive(),
+    maxDelay: z.number().int().positive(),
+    backoffMultiplier: z.number().positive(),
+  }),
+  media: z.object({
+    maxSize: z.number().int().positive(),
+    allowedMimeTypes: z.array(z.string()),
+  }),
+  logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']),
+  defaultCountryCode: z.string().regex(/^\d{1,3}$/),
+});
+
+export type WhatsAppConfig = z.infer<typeof ConfigSchema>;
+
+const DEFAULT_ALLOWED_MIME = [
+  'image/jpeg', 'image/png', 'image/webp',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/plain', 'text/csv',
+  'audio/mpeg', 'audio/mp4', 'audio/amr', 'audio/ogg', 'audio/ogg; codecs=opus',
+  'video/mp4', 'video/3gpp',
+];
+
+function num(env: string | undefined, fallback: number): number {
+  if (env === undefined || env === '') return fallback;
+  const n = Number(env);
+  if (Number.isNaN(n)) throw new Error(`Invalid number for env var: "${env}"`);
+  return n;
 }
 
 export class ConfigManager {
-  private static instance: ConfigManager;
-  private config: WhatsAppConfig;
+  private static instance: ConfigManager | null = null;
+  private readonly config: WhatsAppConfig;
 
   private constructor() {
-    this.config = this.loadConfig();
-    this.validateConfig();
+    const raw = {
+      sessionDir: process.env.WHATSAPP_SESSION_DIR
+        ? path.resolve(process.env.WHATSAPP_SESSION_DIR)
+        : path.resolve(process.cwd(), 'auth-state'),
+      rateLimit: {
+        messagesPerSecond: num(process.env.WHATSAPP_RATE_LIMIT_MESSAGES, 2),
+        mediaPerSecond: num(process.env.WHATSAPP_RATE_LIMIT_MEDIA, 1),
+        burstLimit: num(process.env.WHATSAPP_BURST_LIMIT, 10),
+      },
+      retryPolicy: {
+        maxRetries: num(process.env.WHATSAPP_MAX_RETRIES, 3),
+        baseDelay: num(process.env.WHATSAPP_BASE_DELAY, 1000),
+        maxDelay: num(process.env.WHATSAPP_MAX_DELAY, 30000),
+        backoffMultiplier: num(process.env.WHATSAPP_BACKOFF_MULTIPLIER, 2),
+      },
+      media: {
+        maxSize: num(process.env.WHATSAPP_MAX_MEDIA_SIZE, 15 * 1024 * 1024),
+        allowedMimeTypes: DEFAULT_ALLOWED_MIME,
+      },
+      logLevel: (process.env.WHATSAPP_LOG_LEVEL ?? 'info') as WhatsAppConfig['logLevel'],
+      defaultCountryCode: process.env.WHATSAPP_DEFAULT_COUNTRY_CODE ?? '55',
+    };
+    this.config = ConfigSchema.parse(raw);
   }
 
-  public static getInstance(): ConfigManager {
-    if (!ConfigManager.instance) {
-      ConfigManager.instance = new ConfigManager();
-    }
+  static getInstance(): ConfigManager {
+    if (!ConfigManager.instance) ConfigManager.instance = new ConfigManager();
     return ConfigManager.instance;
   }
 
-  private loadConfig(): WhatsAppConfig {
-    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-    if (!accessToken || !phoneNumberId) {
-      throw new Error('WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required');
-    }
-
-    return {
-      accessToken,
-      phoneNumberId,
-      apiVersion: process.env.WHATSAPP_API_VERSION || 'v17.0',
-      baseUrl: process.env.WHATSAPP_BASE_URL || 'https://graph.facebook.com',
-      rateLimit: {
-        messagesPerSecond: parseInt(process.env.WHATSAPP_RATE_LIMIT_MESSAGES || '10'),
-        mediaPerSecond: parseInt(process.env.WHATSAPP_RATE_LIMIT_MEDIA || '2'),
-        burstLimit: parseInt(process.env.WHATSAPP_BURST_LIMIT || '50')
-      },
-      retryPolicy: {
-        maxRetries: parseInt(process.env.WHATSAPP_MAX_RETRIES || '3'),
-        baseDelay: parseInt(process.env.WHATSAPP_BASE_DELAY || '1000'),
-        maxDelay: parseInt(process.env.WHATSAPP_MAX_DELAY || '30000'),
-        backoffMultiplier: parseFloat(process.env.WHATSAPP_BACKOFF_MULTIPLIER || '2')
-      },
-      media: {
-        maxSize: parseInt(process.env.WHATSAPP_MAX_MEDIA_SIZE || '15728640'), // 15MB
-        allowedTypes: [
-          'image/jpeg', 'image/png', 'image/webp',
-          'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-          'text/plain', 'text/csv',
-          'audio/mpeg', 'audio/mp4', 'audio/amr', 'audio/ogg',
-          'video/mp4', 'video/3gpp'
-        ],
-        compressionEnabled: process.env.WHATSAPP_COMPRESSION_ENABLED !== 'false',
-        tempDir: process.env.WHATSAPP_TEMP_DIR || './temp'
-      }
-    };
+  getConfig(): WhatsAppConfig {
+    return this.config;
   }
 
-  private validateConfig(): void {
-    const { accessToken, phoneNumberId } = this.config;
-    
-    // Validate access token format
-    if (!accessToken.startsWith('EAA') && !accessToken.startsWith('EAAG')) {
-      console.warn('Access token may be invalid. Expected format: EAA... or EAAG...');
-    }
-
-    // Validate phone number ID format
-    if (!/^\d+$/.test(phoneNumberId)) {
-      throw new Error('Phone Number ID must contain only digits');
-    }
-
-    // Validate rate limits
-    if (this.config.rateLimit.messagesPerSecond <= 0) {
-      throw new Error('Messages per second must be greater than 0');
-    }
-
-    // Validate media size
-    if (this.config.media.maxSize > 16777216) { // 16MB WhatsApp limit
-      console.warn('Max media size exceeds WhatsApp limit of 16MB');
-    }
+  /**
+   * Normalize a phone number to WhatsApp JID format: "<digits>@s.whatsapp.net".
+   * Accepts E.164 ("+5521...") or bare digits. Applies defaultCountryCode if
+   * the number is clearly local (fewer than 11 digits).
+   */
+  normalizeJid(phone: string): string {
+    if (phone.endsWith('@s.whatsapp.net') || phone.endsWith('@g.us')) return phone;
+    const digits = phone.replace(/\D+/g, '');
+    if (digits.length === 0) throw new Error(`Invalid phone: "${phone}"`);
+    const withCC = digits.length <= 11 ? `${this.config.defaultCountryCode}${digits}` : digits;
+    return `${withCC}@s.whatsapp.net`;
   }
 
-  public getConfig(): WhatsAppConfig {
-    return { ...this.config };
-  }
-
-  public getApiUrl(): string {
-    return `${this.config.baseUrl}/${this.config.apiVersion}/${this.config.phoneNumberId}`;
-  }
-
-  public getHeaders(): Record<string, string> {
-    return {
-      'Authorization': `Bearer ${this.config.accessToken}`,
-      'Content-Type': 'application/json'
-    };
-  }
-
-  public isValidPhoneNumber(phone: string): boolean {
-    // E.164 format validation
-    return /^\+[1-9]\d{1,14}$/.test(phone);
-  }
-
-  public isAllowedMediaType(mimeType: string): boolean {
-    return this.config.media.allowedTypes.includes(mimeType);
+  isAllowedMimeType(mime: string): boolean {
+    return this.config.media.allowedMimeTypes.includes(mime.toLowerCase());
   }
 }

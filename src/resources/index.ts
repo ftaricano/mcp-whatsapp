@@ -1,180 +1,130 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { ListResourcesRequestSchema, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { WhatsAppService } from '../services/whatsapp-api.js';
 import { TemplateEngine } from '../services/template-engine.js';
-import { ListResourcesRequestSchema, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ConfigManager } from '../config/whatsapp.js';
 
-export function setupResources(server: Server, whatsappService: WhatsAppService): void {
-  // List available resources
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
-    return {
-      resources: [
-        {
-          uri: 'whatsapp://templates',
-          name: 'Message Templates',
-          description: 'Available message templates for document reminders and billing alerts',
-          mimeType: 'application/json'
-        },
-        {
-          uri: 'whatsapp://health',
-          name: 'Service Health',
-          description: 'Current health status of WhatsApp service including rate limits and circuit breaker',
-          mimeType: 'application/json'
-        },
-        {
-          uri: 'whatsapp://config',
-          name: 'Configuration',
-          description: 'Current WhatsApp API configuration (sanitized)',
-          mimeType: 'application/json'
-        }
-      ]
-    };
-  });
+const RESOURCES = [
+  {
+    uri: 'whatsapp://qr',
+    name: 'Pairing QR Code',
+    description: 'QR code atual (data URL PNG). Null se já conectado.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'whatsapp://templates',
+    name: 'Message Templates',
+    description: 'Templates disponíveis (document_reminder, billing_alert, payment_reminder, overdue_notice).',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'whatsapp://health',
+    name: 'Service Health',
+    description: 'Status de conexão, rate limiter e circuit breaker.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'whatsapp://config',
+    name: 'Configuration',
+    description: 'Configuração efetiva do servidor.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'whatsapp://statuses',
+    name: 'Message Statuses',
+    description: 'Status das mensagens enviadas nesta sessão.',
+    mimeType: 'application/json',
+  },
+] as const;
 
-  // Handle resource requests
+export function setupResources(server: Server, service: WhatsAppService): void {
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [...RESOURCES] }));
+
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const { uri } = request.params;
-
-    try {
-      switch (uri) {
-        case 'whatsapp://templates':
-          return {
-            contents: [
-              {
-                uri,
-                mimeType: 'application/json',
-                text: JSON.stringify({
-                  available_templates: TemplateEngine.listTemplates().map(template => ({
-                    name: template.name,
-                    category: template.category,
-                    variables: template.variables,
-                    description: getTemplateDescription(template.name)
-                  })),
-                  usage_examples: {
-                    document_reminder: {
-                      description: "Template para lembrete de documentos",
-                      example_variables: {
-                        name: "João Silva",
-                        document_type: "rg", 
-                        due_date: "2024-12-31",
-                        custom_message: "Por favor, envie em alta resolução",
-                        company_name: "Minha Empresa"
-                      }
-                    },
-                    billing_alert: {
-                      description: "Template para alertas de cobrança",
-                      example_variables: {
-                        name: "Maria Santos",
-                        invoice_number: "INV-2024-001",
-                        amount: 150.50,
-                        due_date: "2024-12-25",
-                        payment_link: "https://pay.example.com/inv001",
-                        company_name: "Minha Empresa"
-                      }
-                    }
-                  }
-                }, null, 2)
-              }
-            ]
-          };
-
-        case 'whatsapp://health':
-          const healthStatus = whatsappService.getHealthStatus();
-          return {
-            contents: [
-              {
-                uri,
-                mimeType: 'application/json',
-                text: JSON.stringify({
-                  service_health: {
-                    status: healthStatus.isHealthy ? 'healthy' : 'unhealthy',
-                    timestamp: new Date().toISOString()
-                  },
-                  circuit_breaker: healthStatus.circuitBreaker,
-                  rate_limiter: {
-                    messages: {
-                      ...healthStatus.rateLimiter.messages,
-                      description: "Rate limiting for text messages"
-                    },
-                    media: {
-                      ...healthStatus.rateLimiter.media,
-                      description: "Rate limiting for media messages"
-                    }
-                  },
-                  api_connection: {
-                    last_tested: new Date().toISOString(),
-                    status: await testApiConnection(whatsappService)
-                  }
-                }, null, 2)
-              }
-            ]
-          };
-
-        case 'whatsapp://config':
-          const config = require('../config/whatsapp.js').ConfigManager.getInstance().getConfig();
-          return {
-            contents: [
-              {
-                uri,
-                mimeType: 'application/json',
-                text: JSON.stringify({
-                  api_version: config.apiVersion,
-                  base_url: config.baseUrl,
-                  phone_number_id: config.phoneNumberId.substring(0, 4) + '****', // Masked
-                  rate_limits: config.rateLimit,
-                  retry_policy: config.retryPolicy,
-                  media_settings: {
-                    max_size_mb: Math.round(config.media.maxSize / 1024 / 1024),
-                    compression_enabled: config.media.compressionEnabled,
-                    allowed_types: config.media.allowedTypes,
-                    temp_dir: config.media.tempDir
-                  },
-                  note: "Sensitive information has been masked for security"
-                }, null, 2)
-              }
-            ]
-          };
-
-        default:
-          throw new Error(`Resource not found: ${uri}`);
-      }
-    } catch (error: any) {
-      console.error(`Error reading resource ${uri}:`, error);
-      return {
-        contents: [
-          {
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify({
-              error: {
-                message: error.message,
-                type: 'resource_read_error',
-                uri: uri
-              },
-              timestamp: new Date().toISOString()
-            }, null, 2)
-          }
-        ]
-      };
-    }
+    const payload = await readResource(uri, service);
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: 'application/json',
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
   });
 }
 
-function getTemplateDescription(templateName: string): string {
-  const descriptions: Record<string, string> = {
-    'document_reminder': 'Template para envio de lembretes de documentos pendentes com prazo',
-    'billing_alert': 'Template para alertas de cobrança/boletos com informações de pagamento',
-    'payment_reminder': 'Template para lembretes de pagamento próximo ao vencimento',
-    'overdue_notice': 'Template para notificações de faturas vencidas com juros'
-  };
-  
-  return descriptions[templateName] || 'Template personalizado';
-}
+async function readResource(uri: string, service: WhatsAppService): Promise<unknown> {
+  switch (uri) {
+    case 'whatsapp://qr': {
+      const qr = service.getCurrentQr();
+      if (!qr) {
+        return {
+          connection: service.getConnectionState(),
+          qr: null,
+          data_url: null,
+          message:
+            service.getConnectionState() === 'open'
+              ? 'Já conectado. Use whatsapp_logout se quiser re-parear.'
+              : 'Aguardando QR. Verifique se o servidor foi iniciado corretamente.',
+        };
+      }
+      const dataUrl = await service.getCurrentQrAsDataUrl();
+      return {
+        connection: service.getConnectionState(),
+        qr_string: qr.qr,
+        data_url: dataUrl,
+        generated_at: qr.generatedAt,
+        instruction: 'WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho',
+      };
+    }
 
-async function testApiConnection(whatsappService: WhatsAppService): Promise<string> {
-  try {
-    const isConnected = await whatsappService.testConnection();
-    return isConnected ? 'connected' : 'disconnected';
-  } catch (error) {
-    return 'error';
+    case 'whatsapp://templates':
+      return {
+        available_templates: TemplateEngine.listTemplates().map((t) => ({
+          name: t.name,
+          category: t.category,
+          variables: t.variables,
+        })),
+      };
+
+    case 'whatsapp://health': {
+      const health = service.getHealth();
+      return {
+        service_health: {
+          status: health.connection === 'open' ? 'healthy' : 'unhealthy',
+          connection: health.connection,
+          me: health.me,
+          timestamp: new Date().toISOString(),
+        },
+        circuit_breaker: health.circuitBreaker,
+        rate_limiter: health.rateLimiter,
+        messages: { pending_or_server_ack: health.pendingMessages },
+      };
+    }
+
+    case 'whatsapp://config': {
+      const cfg = ConfigManager.getInstance().getConfig();
+      return {
+        session_dir: cfg.sessionDir,
+        rate_limits: cfg.rateLimit,
+        retry_policy: cfg.retryPolicy,
+        media: {
+          max_size_mb: Math.round(cfg.media.maxSize / 1024 / 1024),
+          allowed_mime_types: cfg.media.allowedMimeTypes,
+        },
+        log_level: cfg.logLevel,
+        default_country_code: cfg.defaultCountryCode,
+      };
+    }
+
+    case 'whatsapp://statuses':
+      return { statuses: service.getAllStatuses() };
+
+    default:
+      return {
+        error: { type: 'resource_not_found', message: `Resource not found: ${uri}` },
+      };
   }
 }

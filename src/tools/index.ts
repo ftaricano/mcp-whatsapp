@@ -1,105 +1,75 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { WhatsAppService } from '../services/whatsapp-api.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { WhatsAppService } from '../services/whatsapp-api.js';
 
-// Import tools
 import { sendMessageTool, handleSendMessage } from './send-message.js';
 import { sendMediaMessageTool, handleSendMediaMessage } from './send-media-message.js';
 import { sendDocumentReminderTool, handleSendDocumentReminder } from './send-document-reminder.js';
 import { sendBillingAlertTool, handleSendBillingAlert } from './send-billing-alert.js';
 import { getMessageStatusTool, handleGetMessageStatus } from './get-message-status.js';
+import { logoutTool, handleLogout } from './logout.js';
 
-export function setupTools(server: Server, whatsappService: WhatsAppService): void {
-  // Register all tools
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        sendMessageTool,
-        sendMediaMessageTool,
-        sendDocumentReminderTool,
-        sendBillingAlertTool,
-        getMessageStatusTool
-      ]
-    };
-  });
+type Handler = (service: WhatsAppService, args: unknown) => Promise<unknown>;
 
-  // Handle tool calls
+const HANDLERS: Record<string, Handler> = {
+  send_message: handleSendMessage,
+  send_media_message: handleSendMediaMessage,
+  send_document_reminder: handleSendDocumentReminder,
+  send_billing_alert: handleSendBillingAlert,
+  get_message_status: handleGetMessageStatus,
+  whatsapp_logout: handleLogout,
+};
+
+const TOOLS = [
+  sendMessageTool,
+  sendMediaMessageTool,
+  sendDocumentReminderTool,
+  sendBillingAlertTool,
+  getMessageStatusTool,
+  logoutTool,
+];
+
+export function setupTools(server: Server, service: WhatsAppService): void {
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-
-    try {
-      switch (name) {
-        case 'send_message':
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(await handleSendMessage(whatsappService, args), null, 2)
-              }
-            ]
-          };
-
-        case 'send_media_message':
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(await handleSendMediaMessage(whatsappService, args), null, 2)
-              }
-            ]
-          };
-
-        case 'send_document_reminder':
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(await handleSendDocumentReminder(whatsappService, args), null, 2)
-              }
-            ]
-          };
-
-        case 'send_billing_alert':
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(await handleSendBillingAlert(whatsappService, args), null, 2)
-              }
-            ]
-          };
-
-        case 'get_message_status':
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(await handleGetMessageStatus(whatsappService, args), null, 2)
-              }
-            ]
-          };
-
-        default:
-          throw new Error(`Tool desconhecido: ${name}`);
-      }
-    } catch (error: any) {
-      console.error(`Error in tool ${name}:`, error);
+    const handler = HANDLERS[name];
+    if (!handler) {
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
-              success: false,
-              error: {
-                message: error.message,
-                type: 'tool_execution_error',
-                tool_name: name
-              },
-              timestamp: new Date().toISOString()
-            }, null, 2)
-          }
+            text: JSON.stringify({ success: false, error: { type: 'unknown_tool', tool_name: name } }, null, 2),
+          },
         ],
-        isError: true
+        isError: true,
+      };
+    }
+    try {
+      const result = await handler(service, args);
+      const isError = typeof result === 'object' && result !== null && (result as { success?: boolean }).success === false;
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        isError,
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: false,
+                error: { type: 'tool_execution_error', message: (err as Error).message, tool_name: name },
+                timestamp: new Date().toISOString(),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+        isError: true,
       };
     }
   });

@@ -1,140 +1,89 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { WhatsAppService } from '../services/whatsapp-api.js';
+import { z } from 'zod';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as mime from 'mime-types';
+import { WhatsAppService } from '../services/whatsapp-api.js';
 
 export const sendMediaMessageTool: Tool = {
-  name: "send_media_message",
-  description: "Enviar mensagem com anexo (imagem, documento, áudio ou vídeo) até 15MB",
+  name: 'send_media_message',
+  description: 'Enviar anexo (imagem, documento, áudio ou vídeo) até 15MB.',
   inputSchema: {
-    type: "object",
+    type: 'object',
     properties: {
       to: {
-        type: "string",
-        pattern: "^\\+[1-9]\\d{1,14}$",
-        description: "Número WhatsApp no formato E.164 (ex: +5511999999999)"
+        type: 'string',
+        minLength: 8,
+        description: 'Número WhatsApp (E.164 ou dígitos).',
       },
       media_path: {
-        type: "string",
-        description: "Caminho para o arquivo de mídia (máximo 15MB)"
+        type: 'string',
+        description: 'Caminho absoluto do arquivo (máx 15MB).',
       },
       media_type: {
-        type: "string",
-        enum: ["image", "document", "audio", "video"],
-        description: "Tipo de mídia do arquivo"
+        type: 'string',
+        enum: ['image', 'document', 'audio', 'video'],
+        description: 'Tipo de mídia.',
       },
       caption: {
-        type: "string",
+        type: 'string',
         maxLength: 1024,
-        description: "Legenda/descrição do arquivo (opcional, máximo 1024 caracteres)"
+        description: 'Legenda (opcional, máx 1024). Ignorada para áudio.',
       },
       filename: {
-        type: "string",
-        description: "Nome personalizado para o arquivo (opcional, usado principalmente para documentos)"
-      }
+        type: 'string',
+        description: 'Nome personalizado (usado para documentos).',
+      },
     },
-    required: ["to", "media_path", "media_type"]
-  }
+    required: ['to', 'media_path', 'media_type'],
+  },
 };
 
-export async function handleSendMediaMessage(
-  whatsappService: WhatsAppService,
-  args: any
-): Promise<any> {
+const schema = z.object({
+  to: z.string().min(8),
+  media_path: z.string().min(1),
+  media_type: z.enum(['image', 'document', 'audio', 'video']),
+  caption: z.string().max(1024).optional(),
+  filename: z.string().optional(),
+});
+
+export async function handleSendMediaMessage(service: WhatsAppService, args: unknown): Promise<unknown> {
+  const parsed = schema.safeParse(args);
+  if (!parsed.success) {
+    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
+  }
+  const data = parsed.data;
   try {
-    // Validate required parameters
-    if (!args.to || !args.media_path || !args.media_type) {
-      throw new Error('Parâmetros obrigatórios: to, media_path, media_type');
-    }
-
-    // Validate phone number format
-    if (!args.to.match(/^\+[1-9]\d{1,14}$/)) {
-      throw new Error(`Número de telefone inválido: ${args.to}. Use o formato E.164 (ex: +5511999999999)`);
-    }
-
-    // Validate media type
-    const allowedTypes = ['image', 'document', 'audio', 'video'];
-    if (!allowedTypes.includes(args.media_type)) {
-      throw new Error(`Tipo de mídia inválido: ${args.media_type}. Tipos permitidos: ${allowedTypes.join(', ')}`);
-    }
-
-    // Check if file exists
-    try {
-      await fs.access(args.media_path);
-    } catch {
-      throw new Error(`Arquivo não encontrado: ${args.media_path}`);
-    }
-
-    // Get file information
-    const fileStats = await fs.stat(args.media_path);
-    const fileSize = fileStats.size;
-    const mimeType = mime.lookup(args.media_path);
-    const fileName = args.filename || path.basename(args.media_path);
-
-    // Validate file size (15MB limit)
-    const maxSize = 15 * 1024 * 1024; // 15MB
-    if (fileSize > maxSize) {
-      throw new Error(`Arquivo muito grande: ${(fileSize / 1024 / 1024).toFixed(2)}MB. Máximo permitido: 15MB`);
-    }
-
-    // Validate MIME type
-    if (!mimeType) {
-      throw new Error(`Não foi possível determinar o tipo do arquivo: ${args.media_path}`);
-    }
-
-    // Validate caption length
-    if (args.caption && args.caption.length > 1024) {
-      throw new Error(`Legenda muito longa: ${args.caption.length} caracteres. Máximo permitido: 1024`);
-    }
-
-    console.log(`Sending ${args.media_type} to ${args.to}: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
-
-    const response = await whatsappService.sendMediaMessage({
-      to: args.to,
-      mediaPath: args.media_path,
-      mediaType: args.media_type,
-      caption: args.caption,
-      filename: fileName
+    const sent = await service.sendMediaMessage({
+      to: data.to,
+      mediaPath: data.media_path,
+      mediaType: data.media_type,
+      caption: data.caption,
+      filename: data.filename,
     });
-
-    // Extract relevant information from response
-    const messageId = response.messages?.[0]?.id;
-    const contactWaId = response.contacts?.[0]?.wa_id;
-
+    const stat = await fs.stat(data.media_path).catch(() => null);
+    const mimeType = (mime.lookup(data.media_path) || '').toString() || null;
     return {
       success: true,
-      message_id: messageId,
-      contact_wa_id: contactWaId,
-      to: args.to,
+      message_id: sent.message_id,
+      to_jid: sent.to_jid,
+      status: sent.status,
       media_info: {
-        type: args.media_type,
-        filename: fileName,
-        size_mb: Number((fileSize / 1024 / 1024).toFixed(2)),
+        type: data.media_type,
+        filename: data.filename ?? path.basename(data.media_path),
+        size_mb: stat ? Number((stat.size / 1024 / 1024).toFixed(2)) : null,
         mime_type: mimeType,
-        caption: args.caption || null
+        caption: data.caption ?? null,
       },
-      timestamp: new Date().toISOString(),
-      details: {
-        messaging_product: response.messaging_product,
-        status: "sent"
-      }
+      timestamp: sent.timestamp,
     };
-
-  } catch (error: any) {
-    console.error('Error sending media message:', error);
-    
+  } catch (err) {
     return {
       success: false,
-      error: {
-        message: error.message,
-        type: error.response?.status ? 'api_error' : 'validation_error',
-        status_code: error.response?.status,
-        details: error.response?.data || null
-      },
-      to: args.to,
-      media_path: args.media_path,
-      timestamp: new Date().toISOString()
+      error: { type: 'send_failed', message: (err as Error).message },
+      to: data.to,
+      media_path: data.media_path,
+      timestamp: new Date().toISOString(),
     };
   }
 }
