@@ -62,14 +62,14 @@ export class CircuitBreaker {
   private trip(): void {
     this.state = CircuitBreakerState.OPEN;
     this.nextAttempt = Date.now() + this.resetTimeout;
-    console.warn(`Circuit breaker TRIPPED. Will attempt reset at ${new Date(this.nextAttempt).toISOString()}`);
+    emitOpsLog('warn', `Circuit breaker TRIPPED. Will attempt reset at ${new Date(this.nextAttempt).toISOString()}`);
   }
 
   private reset(): void {
     this.failures = 0;
     this.state = CircuitBreakerState.CLOSED;
     this.nextAttempt = 0;
-    console.info('Circuit breaker RESET - normal operation resumed');
+    emitOpsLog('info', 'Circuit breaker RESET - normal operation resumed');
   }
 
   public getState(): CircuitBreakerState {
@@ -95,11 +95,19 @@ export class CircuitBreaker {
   public forceOpen(): void {
     this.state = CircuitBreakerState.OPEN;
     this.nextAttempt = Date.now() + this.resetTimeout;
-    console.warn('Circuit breaker manually set to OPEN');
+    emitOpsLog('warn', 'Circuit breaker manually set to OPEN');
   }
 
   public forceClose(): void {
     this.reset();
-    console.info('Circuit breaker manually reset to CLOSED');
+    emitOpsLog('info', 'Circuit breaker manually reset to CLOSED');
   }
+}
+
+// Ops-level logs always go to stderr (never stdout, so JSON output stays clean)
+// and are fully suppressed when the log level is `silent` (respecting --quiet).
+function emitOpsLog(level: 'info' | 'warn', msg: string): void {
+  if (process.env.WHATSAPP_LOG_LEVEL === 'silent') return;
+  const prefix = level === 'warn' ? '[circuit-breaker][warn]' : '[circuit-breaker]';
+  process.stderr.write(`${prefix} ${msg}\n`);
 }

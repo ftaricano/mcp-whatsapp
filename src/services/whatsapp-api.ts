@@ -190,9 +190,14 @@ export class WhatsAppService {
       this.currentQrGeneratedAt = Date.now();
       this.connectionState = 'qr';
       this.logger.info('QR code generated — scan from WhatsApp → Linked Devices');
-      qrcodeTerminal.generate(qr, { small: true }, (ascii) => {
-        process.stderr.write('\n' + ascii + '\n');
-      });
+      // Suppress ASCII QR when logger is silenced — callers using --json/--quiet
+      // don't want the QR block splattered on stderr. They can still retrieve
+      // the QR string via the `whatsapp://qr` resource or getCurrentQr().
+      if (this.config.getConfig().logLevel !== 'silent') {
+        qrcodeTerminal.generate(qr, { small: true }, (ascii) => {
+          process.stderr.write('\n' + ascii + '\n');
+        });
+      }
     }
 
     if (connection === 'open') {

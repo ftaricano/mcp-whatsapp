@@ -115,6 +115,14 @@ async function main(): Promise<void> {
   };
 
   const timeout = flags.timeout ? parseInt(flags.timeout, 10) : 60_000;
+
+  // Suppress pino + Baileys internal logs when --quiet. The service's config
+  // singleton reads WHATSAPP_LOG_LEVEL on first access, so we must set it
+  // BEFORE constructing WhatsAppService.
+  if (flags.quiet && !process.env.WHATSAPP_LOG_LEVEL) {
+    process.env.WHATSAPP_LOG_LEVEL = 'silent';
+  }
+
   const service = new WhatsAppService();
 
   try {
