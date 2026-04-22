@@ -1,5 +1,9 @@
 # mcp-whatsapp
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A518-brightgreen.svg)](https://nodejs.org)
+[![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2.svg)](https://modelcontextprotocol.io)
+
 Integração com WhatsApp via Baileys (autenticação por QR code). Distribui dois binários:
 
 - **`whatsapp` (CLI)** — on-demand. Spawna, envia, encerra. Use pro dia-a-dia (envio pontual, integração em scripts/cron, agentes que precisam "mandar algo agora").
@@ -17,7 +21,7 @@ Sem token oficial da Meta, sem aprovação de Business account — usa a mesma s
 ## Instalação
 
 ```bash
-git clone <repo>
+git clone https://github.com/ftaricano/mcp-whatsapp.git
 cd mcp-whatsapp
 npm install
 npm run build
@@ -217,6 +221,23 @@ npm run smoke -- logout
 
 **Erro "not ready"** → o servidor ainda está pareando ou reconectando. Espere o `connection: open` no health resource, ou rode `npm start` no terminal pra ver o QR.
 
+## Segurança
+
+- **Nunca commite** `auth-state/` — contém as credenciais da sessão (equivale à chave do seu WhatsApp).
+- O diretório de sessão default é `./auth-state/` e já está no `.gitignore`.
+- Em caso de suspeita de vazamento, rode `whatsapp logout` (apaga local) **e** desconecte o aparelho em *WhatsApp → Aparelhos conectados*.
+- Encontrou vulnerabilidade? Abra uma [security advisory privada](https://github.com/ftaricano/mcp-whatsapp/security/advisories/new) — não reporte em issue pública.
+
+## Contribuindo
+
+PRs bem-vindos. Antes de abrir:
+
+1. `npm run build` passa sem erro
+2. `npm run smoke -- status` funciona numa sessão pareada
+3. Descrição do PR explica o *porquê*, não só o *o quê*
+
+Bugs e feature requests em [Issues](https://github.com/ftaricano/mcp-whatsapp/issues).
+
 ## Licença
 
-MIT.
+[MIT](LICENSE) © Fernando Taricano
