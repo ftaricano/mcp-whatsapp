@@ -1,6 +1,11 @@
 # mcp-whatsapp
 
-MCP (Model Context Protocol) server para WhatsApp, **autenticado via QR code** (Baileys). Sem token oficial da Meta, sem aprovação de Business account — usa a mesma sessão do WhatsApp Web. Ideal para disparo controlado de mensagens, lembretes de documentos e alertas de cobrança pra contatos que já te conhecem.
+Integração com WhatsApp via Baileys (autenticação por QR code). Distribui dois binários:
+
+- **`whatsapp` (CLI)** — on-demand. Spawna, envia, encerra. Use pro dia-a-dia (envio pontual, integração em scripts/cron, agentes que precisam "mandar algo agora").
+- **`mcp-whatsapp` (MCP server)** — long-running. Necessário se você precisa **ler** mensagens recebidas (`list_chats`, `read_chat`) ou acompanhar status de entrega em tempo real.
+
+Sem token oficial da Meta, sem aprovação de Business account — usa a mesma sessão do WhatsApp Web. Funciona com **WhatsApp pessoal ou Business** (qualquer conta que pareia em "Aparelhos conectados"). Ideal para disparo controlado de mensagens, lembretes de documentos e alertas de cobrança pra contatos que já te conhecem.
 
 > ⚠️ **Uso responsável.** WhatsApp bane números por comportamento de spam, não por "biblioteca usada". Mantenha volume moderado (o rate limiter default é 2 msg/s), não mande pra quem não te conhece, e respeite opt-outs. Para disparo em massa de campanhas, use a Cloud API oficial.
 
@@ -16,14 +21,17 @@ git clone <repo>
 cd mcp-whatsapp
 npm install
 npm run build
+npm link     # opcional — expõe `whatsapp` e `mcp-whatsapp` globalmente
 ```
 
 ## Primeiro pareamento (QR)
 
-Rode o servidor uma vez pelo terminal:
+Rode qualquer um dos dois comandos abaixo pela primeira vez:
 
 ```bash
-npm start
+whatsapp pair        # via CLI
+# ou
+npm start            # via MCP server
 ```
 
 Um QR code ASCII aparece no **stderr**. No celular:
@@ -36,9 +44,36 @@ A sessão é salva em `./auth-state/` (configurável via `WHATSAPP_SESSION_DIR`)
 
 Para ler o QR como PNG (ex: num cliente MCP), leia o resource `whatsapp://qr` — retorna `data_url` (base64 PNG).
 
+## Uso via CLI (recomendado pra maioria dos casos)
+
+Depois de pareado, invoque direto:
+
+```bash
+whatsapp send "+5521999999999" "Passando só pra avisar."
+
+whatsapp media "+5521999999999" /path/para/boleto.pdf \
+  --caption "Seu boleto em anexo" --name "boleto-2026-04.pdf"
+
+whatsapp billing "+5521999999999" \
+  --amount 299.90 --due 2026-05-10 --invoice BOL-42 \
+  --name "João Silva" --link "https://pay.ex/42" --company "CPZ Seguros"
+
+whatsapp reminder "+5521999999999" \
+  --doc rg --due 2026-05-03 --name "João Silva" --company "CPZ Seguros"
+
+whatsapp health --json --quiet | jq '.connection'   # pre-flight check
+whatsapp logout
+```
+
+Flags globais: `--json` (saída parseável), `--quiet` (suprime logs humanos em stderr), `--timeout <ms>` (padrão 60s).
+
+Rode `whatsapp --help` pra ver tudo.
+
+**Latência típica:** 3-5s por comando (handshake Baileys a cada invocação). Se isso for dealbreaker, ou se você precisa ler mensagens, use o MCP server (abaixo).
+
 ## Uso via MCP
 
-Adicione ao `~/.claude.json` ou equivalente:
+Necessário quando você precisa de inbox em tempo real (`list_chats`, `read_chat`) ou status de entrega persistente. Adicione ao `~/.claude.json` ou equivalente:
 
 ```json
 {
