@@ -8,6 +8,8 @@ import { sendDocumentReminderTool, handleSendDocumentReminder } from './send-doc
 import { sendBillingAlertTool, handleSendBillingAlert } from './send-billing-alert.js';
 import { getMessageStatusTool, handleGetMessageStatus } from './get-message-status.js';
 import { logoutTool, handleLogout } from './logout.js';
+import { listChatsTool, handleListChats } from './list-chats.js';
+import { readChatTool, handleReadChat } from './read-chat.js';
 
 type Handler = (service: WhatsAppService, args: unknown) => Promise<unknown>;
 
@@ -18,6 +20,8 @@ const HANDLERS: Record<string, Handler> = {
   send_billing_alert: handleSendBillingAlert,
   get_message_status: handleGetMessageStatus,
   whatsapp_logout: handleLogout,
+  list_chats: handleListChats,
+  read_chat: handleReadChat,
 };
 
 const TOOLS = [
@@ -27,6 +31,8 @@ const TOOLS = [
   sendBillingAlertTool,
   getMessageStatusTool,
   logoutTool,
+  listChatsTool,
+  readChatTool,
 ];
 
 export function setupTools(server: Server, service: WhatsAppService): void {
