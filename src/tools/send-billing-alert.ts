@@ -1,7 +1,8 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { WhatsAppService } from '../services/whatsapp-api.js';
-import { TemplateEngine } from '../services/template-engine.js';
+import { TemplateEngine, computeOverdueAmount } from '../services/template-engine.js';
+import { fail, failValidation } from '../utils/tool-response.js';
 
 export const sendBillingAlertTool: Tool = {
   name: 'send_billing_alert',
@@ -20,7 +21,16 @@ export const sendBillingAlertTool: Tool = {
       include_interest_info: {
         type: 'boolean',
         default: false,
-        description: 'Anexar aviso de juros/multa.',
+        description: 'Anexar aviso de juros/multa ao fim da mensagem.',
+      },
+      interest_policy: {
+        type: 'object',
+        description:
+          'Política de juros/multa para o cálculo de overdue (opcional). Defaults: 1% a.m. de juros simples pro rata + 2% multa.',
+        properties: {
+          monthly_interest_pct: { type: 'number', minimum: 0, description: 'Juros mensais (% a.m.).' },
+          penalty_pct: { type: 'number', minimum: 0, description: 'Multa única (%).' },
+        },
       },
     },
     required: ['to', 'amount', 'due_date', 'invoice_number'],
@@ -37,19 +47,31 @@ const schema = z.object({
   payment_link: z.string().url().optional(),
   company_name: z.string().optional(),
   include_interest_info: z.boolean().optional().default(false),
+  interest_policy: z
+    .object({
+      monthly_interest_pct: z.number().min(0).optional(),
+      penalty_pct: z.number().min(0).optional(),
+    })
+    .optional(),
 });
 
-export async function handleSendBillingAlert(service: WhatsAppService, args: unknown): Promise<unknown> {
+export async function handleSendBillingAlert(
+  service: WhatsAppService,
+  args: unknown,
+): Promise<unknown> {
   const parsed = schema.safeParse(args);
-  if (!parsed.success) {
-    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
-  }
+  if (!parsed.success) return failValidation(parsed.error);
   const data = parsed.data;
 
   const dueDate = new Date(data.due_date);
   if (Number.isNaN(dueDate.getTime())) {
-    return { success: false, error: { type: 'validation_error', message: `Data inválida: ${data.due_date}` } };
+    return failValidation(new Error(`Data inválida: ${data.due_date}`));
   }
+
+  const policy = {
+    monthlyInterestPct: data.interest_policy?.monthly_interest_pct ?? 1,
+    penaltyPct: data.interest_policy?.penalty_pct ?? 2,
+  };
 
   let messageText = TemplateEngine.createBillingAlertMessage({
     name: data.name,
@@ -59,6 +81,7 @@ export async function handleSendBillingAlert(service: WhatsAppService, args: unk
     payment_link: data.payment_link,
     barcode: data.barcode,
     company_name: data.company_name,
+    interest_policy: policy,
   });
 
   const today = new Date();
@@ -66,14 +89,19 @@ export async function handleSendBillingAlert(service: WhatsAppService, args: unk
   const daysUntilDue = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 
   if (data.include_interest_info && daysUntilDue >= 0) {
-    messageText += `\n\n⚠️ *Importante:* Após o vencimento, incidirão juros de 1% ao mês e multa de 2%.`;
+    messageText +=
+      `\n\n⚠️ *Importante:* Após o vencimento, incidirão juros de ` +
+      `${policy.monthlyInterestPct}% ao mês e multa de ${policy.penaltyPct}%.`;
   }
 
   try {
     const sent = await service.sendMessage({ to: data.to, message: messageText });
 
-    const status =
-      daysUntilDue > 0 ? 'pending' : daysUntilDue === 0 ? 'due_today' : 'overdue';
+    const status = daysUntilDue > 0 ? 'pending' : daysUntilDue === 0 ? 'due_today' : 'overdue';
+    const updatedAmount =
+      daysUntilDue < 0
+        ? computeOverdueAmount(data.amount, Math.abs(daysUntilDue), policy)
+        : data.amount;
 
     return {
       success: true,
@@ -84,6 +112,8 @@ export async function handleSendBillingAlert(service: WhatsAppService, args: unk
         invoice_number: data.invoice_number,
         amount: data.amount,
         amount_formatted: new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(data.amount),
+        amount_with_interest: updatedAmount,
+        amount_with_interest_formatted: new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(updatedAmount),
         due_date: data.due_date,
         days_until_due: daysUntilDue,
         billing_status: status,
@@ -91,6 +121,7 @@ export async function handleSendBillingAlert(service: WhatsAppService, args: unk
         company_name: data.company_name ?? 'Nossa Empresa',
         has_barcode: !!data.barcode,
         has_payment_link: !!data.payment_link,
+        interest_policy: policy,
       },
       payment_options: {
         barcode: data.barcode ?? null,
@@ -100,11 +131,6 @@ export async function handleSendBillingAlert(service: WhatsAppService, args: unk
       timestamp: sent.timestamp,
     };
   } catch (err) {
-    return {
-      success: false,
-      error: { type: 'send_failed', message: (err as Error).message },
-      to: data.to,
-      timestamp: new Date().toISOString(),
-    };
+    return fail('send_failed', err, { to: data.to });
   }
 }

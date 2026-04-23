@@ -1,10 +1,12 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { WhatsAppService } from '../services/whatsapp-api.js';
+import { fail, failValidation } from '../utils/tool-response.js';
 
 export const sendMessageTool: Tool = {
   name: 'send_message',
-  description: 'Enviar mensagem de texto via WhatsApp. Aceita número E.164 (+5521999999999) ou dígitos puros (5521999999999).',
+  description:
+    'Enviar mensagem de texto via WhatsApp. Aceita número E.164 (+5521999999999) ou dígitos puros (5521999999999).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -37,9 +39,7 @@ const schema = z.object({
 
 export async function handleSendMessage(service: WhatsAppService, args: unknown): Promise<unknown> {
   const parsed = schema.safeParse(args);
-  if (!parsed.success) {
-    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
-  }
+  if (!parsed.success) return failValidation(parsed.error);
   try {
     const sent = await service.sendMessage(parsed.data);
     return {
@@ -50,16 +50,6 @@ export async function handleSendMessage(service: WhatsAppService, args: unknown)
       timestamp: sent.timestamp,
     };
   } catch (err) {
-    return errorResponse(err, { to: parsed.data.to });
+    return fail('send_failed', err, { to: parsed.data.to });
   }
-}
-
-function errorResponse(err: unknown, ctx: Record<string, unknown>): unknown {
-  const e = err as Error;
-  return {
-    success: false,
-    error: { type: 'send_failed', message: e.message },
-    ...ctx,
-    timestamp: new Date().toISOString(),
-  };
 }

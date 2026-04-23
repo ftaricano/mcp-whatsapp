@@ -6,7 +6,6 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  WAMessageKey,
   WASocket,
   proto,
 } from '@whiskeysockets/baileys';
@@ -18,8 +17,18 @@ import { ConfigManager } from '../config/whatsapp.js';
 import { RateLimiter } from '../utils/rate-limiter.js';
 import { RetryHandler } from '../utils/retry.js';
 import { CircuitBreaker } from '../utils/circuit-breaker.js';
+import { resolveSafePath } from '../utils/path-safety.js';
+import {
+  InboxStore,
+  InboxMessage,
+  ChatSummary,
+  InboxMessageType,
+  normalizeInboxMessage,
+} from './inbox-store.js';
+import { StatusTracker, StatusEntry, MessageStatus } from './status-tracker.js';
 
 export type MediaType = 'image' | 'document' | 'audio' | 'video';
+export type { InboxMessage, ChatSummary, InboxMessageType, StatusEntry, MessageStatus };
 
 export interface SendMessageParams {
   to: string;
@@ -42,41 +51,10 @@ export interface SentMessage {
   status: MessageStatus;
 }
 
-export type MessageStatus = 'pending' | 'server_ack' | 'delivered' | 'read' | 'played' | 'error';
-
 export type ConnectionState = 'disconnected' | 'connecting' | 'qr' | 'open' | 'logged_out';
 
-interface StatusEntry {
-  status: MessageStatus;
-  updatedAt: string;
-  to_jid: string;
-}
-
-export type InboxMessageType = 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location' | 'contact' | 'other';
-
-export interface InboxMessage {
-  id: string;
-  chat_jid: string;
-  from_jid: string;
-  from_me: boolean;
-  timestamp: string;
-  type: InboxMessageType;
-  text: string | null;
-  pushName: string | null;
-  media_filename: string | null;
-}
-
-export interface ChatSummary {
-  chat_jid: string;
-  last_timestamp: string;
-  last_message_preview: string | null;
-  last_from_me: boolean;
-  unread_count: number;
-  message_count: number;
-}
-
-const INBOX_PER_CHAT_LIMIT = 100;
-const INBOX_TOTAL_LIMIT = 1000;
+const RECONNECT_DELAY_MS = 2000;
+const DEFAULT_ENSURE_READY_MS = 15_000;
 
 export class WhatsAppService {
   private readonly config = ConfigManager.getInstance();
@@ -85,19 +63,22 @@ export class WhatsAppService {
   private readonly mediaLimiter: RateLimiter;
   private readonly circuitBreaker: CircuitBreaker;
   private readonly retryHandler: RetryHandler;
+  private readonly inbox: InboxStore;
+  private readonly statuses: StatusTracker;
 
   private sock: WASocket | null = null;
-  private saveCreds: (() => Promise<void>) | null = null;
   private connectionState: ConnectionState = 'disconnected';
   private currentQr: string | null = null;
   private currentQrGeneratedAt: number | null = null;
   private me: { id: string; name?: string } | null = null;
-  private readonly statusMap = new Map<string, StatusEntry>();
-  private readonly inbox = new Map<string, InboxMessage[]>();
-  private readonly unreadByChat = new Map<string, number>();
-  private inboxTotalCount = 0;
-  private readyWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+  private readyWaiters: Array<{
+    resolve: () => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
   private manualLogout = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private shutdown = false;
 
   constructor() {
     const cfg = this.config.getConfig();
@@ -111,13 +92,15 @@ export class WhatsAppService {
       maxDelay: cfg.retryPolicy.maxDelay,
       backoffMultiplier: cfg.retryPolicy.backoffMultiplier,
     });
+    this.inbox = new InboxStore();
+    this.statuses = new StatusTracker();
   }
 
   async start(): Promise<void> {
+    if (this.shutdown) throw new Error('Service is shutting down');
     const cfg = this.config.getConfig();
     await fs.mkdir(cfg.sessionDir, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(cfg.sessionDir);
-    this.saveCreds = saveCreds;
 
     const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({
       version: [2, 3000, 0] as [number, number, number],
@@ -125,56 +108,45 @@ export class WhatsAppService {
     }));
     this.logger.info({ version, isLatest }, 'Starting Baileys socket');
 
+    this.teardownSocket();
     this.connectionState = 'connecting';
+
     this.sock = makeWASocket({
       auth: state,
       version,
-      logger: this.logger.child({ mod: 'baileys' }) as any,
+      logger: this.logger.child({ mod: 'baileys' }) as unknown as Logger,
       printQRInTerminal: false,
-      browser: ['mcp-whatsapp', 'Chrome', '2.0.0'],
+      browser: ['mcp-whatsapp', 'Chrome', '2.1.0'],
       markOnlineOnConnect: false,
       syncFullHistory: false,
     });
 
     this.sock.ev.on('creds.update', saveCreds);
-    this.sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(update));
-    this.sock.ev.on('messages.update', (updates) => this.handleMessageUpdates(updates));
-    this.sock.ev.on('messages.upsert', (payload) => this.handleMessagesUpsert(payload));
+    this.sock.ev.on('connection.update', (u) => this.handleConnectionUpdate(u));
+    this.sock.ev.on('messages.update', (u) => this.statuses.applyUpdates(u));
+    this.sock.ev.on('messages.upsert', (p) => this.handleMessagesUpsert(p));
+  }
+
+  private teardownSocket(): void {
+    if (!this.sock) return;
+    try {
+      this.sock.ev.removeAllListeners('creds.update');
+      this.sock.ev.removeAllListeners('connection.update');
+      this.sock.ev.removeAllListeners('messages.update');
+      this.sock.ev.removeAllListeners('messages.upsert');
+      // end() emits 'close'; that's fine because we just removed our listener.
+      this.sock.end(undefined);
+    } catch (err) {
+      this.logger.debug({ err }, 'teardownSocket ignored error');
+    }
+    this.sock = null;
   }
 
   private handleMessagesUpsert(payload: { messages: proto.IWebMessageInfo[]; type: string }): void {
     if (payload.type !== 'notify' && payload.type !== 'append') return;
     for (const m of payload.messages) {
       const normalized = normalizeInboxMessage(m);
-      if (!normalized) continue;
-      this.appendInbox(normalized);
-    }
-  }
-
-  private appendInbox(msg: InboxMessage): void {
-    const list = this.inbox.get(msg.chat_jid) ?? [];
-    list.push(msg);
-    if (list.length > INBOX_PER_CHAT_LIMIT) list.shift();
-    this.inbox.set(msg.chat_jid, list);
-    this.inboxTotalCount++;
-
-    if (!msg.from_me) {
-      this.unreadByChat.set(msg.chat_jid, (this.unreadByChat.get(msg.chat_jid) ?? 0) + 1);
-    }
-
-    while (this.inboxTotalCount > INBOX_TOTAL_LIMIT) {
-      let oldestChat: string | null = null;
-      let oldestTs = Infinity;
-      for (const [chat, msgs] of this.inbox) {
-        if (msgs.length === 0) continue;
-        const ts = new Date(msgs[0].timestamp).getTime();
-        if (ts < oldestTs) { oldestTs = ts; oldestChat = chat; }
-      }
-      if (!oldestChat) break;
-      const msgs = this.inbox.get(oldestChat)!;
-      msgs.shift();
-      this.inboxTotalCount--;
-      if (msgs.length === 0) this.inbox.delete(oldestChat);
+      if (normalized) this.inbox.append(normalized);
     }
   }
 
@@ -190,9 +162,6 @@ export class WhatsAppService {
       this.currentQrGeneratedAt = Date.now();
       this.connectionState = 'qr';
       this.logger.info('QR code generated — scan from WhatsApp → Linked Devices');
-      // Suppress ASCII QR when logger is silenced — callers using --json/--quiet
-      // don't want the QR block splattered on stderr. They can still retrieve
-      // the QR string via the `whatsapp://qr` resource or getCurrentQr().
       if (this.config.getConfig().logLevel !== 'silent') {
         qrcodeTerminal.generate(qr, { small: true }, (ascii) => {
           process.stderr.write('\n' + ascii + '\n');
@@ -216,42 +185,43 @@ export class WhatsAppService {
 
       if (loggedOut || this.manualLogout) {
         this.connectionState = 'logged_out';
-        this.rejectReadyWaiters(new Error('Logged out — scan QR again via `npm start`'));
+        this.rejectReadyWaiters(new Error('Logged out — scan QR again via `whatsapp pair` or `npm start`'));
         return;
       }
 
+      if (this.shutdown) return;
       this.connectionState = 'connecting';
-      setTimeout(() => {
-        this.start().catch((err) => this.logger.error({ err }, 'Reconnect failed'));
-      }, 2000);
+      this.scheduleReconnect();
     }
   }
 
-  private handleMessageUpdates(updates: Array<{ key: WAMessageKey; update: Partial<proto.IWebMessageInfo> }>): void {
-    for (const { key, update } of updates) {
-      const id = key.id;
-      if (!id) continue;
-      const existing = this.statusMap.get(id);
-      if (!existing) continue;
-      const statusCode = update.status;
-      if (statusCode === undefined || statusCode === null) continue;
-      const mapped = mapProtoStatus(statusCode);
-      if (mapped) {
-        this.statusMap.set(id, { ...existing, status: mapped, updatedAt: new Date().toISOString() });
-      }
-    }
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.start().catch((err) => {
+        this.logger.error({ err }, 'Reconnect failed — will wait for next socket close');
+      });
+    }, RECONNECT_DELAY_MS);
+    this.reconnectTimer.unref?.();
   }
 
   private flushReadyWaiters(): void {
     const waiters = this.readyWaiters;
     this.readyWaiters = [];
-    for (const w of waiters) w.resolve();
+    for (const w of waiters) {
+      clearTimeout(w.timer);
+      w.resolve();
+    }
   }
 
   private rejectReadyWaiters(err: Error): void {
     const waiters = this.readyWaiters;
     this.readyWaiters = [];
-    for (const w of waiters) w.reject(err);
+    for (const w of waiters) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
   }
 
   /**
@@ -265,20 +235,19 @@ export class WhatsAppService {
       return Promise.reject(new Error('Logged out — re-pair required'));
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.readyWaiters = this.readyWaiters.filter((w) => w.resolve !== resolve);
-        reject(new Error(`Timed out after ${timeoutMs}ms waiting for WhatsApp connection (state=${this.connectionState})`));
-      }, timeoutMs);
-      this.readyWaiters.push({
-        resolve: () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        reject: (err) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      });
+      const waiter = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          const idx = this.readyWaiters.indexOf(waiter);
+          if (idx >= 0) this.readyWaiters.splice(idx, 1);
+          reject(new Error(
+            `Timed out after ${timeoutMs}ms waiting for WhatsApp connection (state=${this.connectionState})`,
+          ));
+        }, timeoutMs),
+      };
+      waiter.timer.unref?.();
+      this.readyWaiters.push(waiter);
     });
   }
 
@@ -290,7 +259,7 @@ export class WhatsAppService {
     return this.circuitBreaker.execute(() =>
       this.retryHandler.execute(async () => {
         await this.messageLimiter.wait();
-        const content: any = { text: params.message };
+        const content: { text: string; linkPreview?: null } = { text: params.message };
         if (!params.preview_url) content.linkPreview = null;
         const sent = await this.requireSocket().sendMessage(jid, content);
         return this.recordSent(sent, jid);
@@ -301,11 +270,11 @@ export class WhatsAppService {
   async sendMediaMessage(params: SendMediaParams): Promise<SentMessage> {
     await this.ensureReady();
     const jid = this.config.normalizeJid(params.to);
-    await this.validateMediaFile(params.mediaPath);
+    const safePath = await this.validateMediaFile(params.mediaPath);
 
-    const mimeType = (mime.lookup(params.mediaPath) || 'application/octet-stream').toString();
-    const filename = params.filename || path.basename(params.mediaPath);
-    const buffer = await fs.readFile(params.mediaPath);
+    const mimeType = (mime.lookup(safePath) || 'application/octet-stream').toString();
+    const filename = params.filename || path.basename(safePath);
+    const buffer = await fs.readFile(safePath);
 
     return this.circuitBreaker.execute(() =>
       this.retryHandler.execute(async () => {
@@ -318,47 +287,40 @@ export class WhatsAppService {
   }
 
   listChats(limit = 50): ChatSummary[] {
-    const summaries: ChatSummary[] = [];
-    for (const [chat_jid, msgs] of this.inbox) {
-      if (msgs.length === 0) continue;
-      const last = msgs[msgs.length - 1];
-      summaries.push({
-        chat_jid,
-        last_timestamp: last.timestamp,
-        last_message_preview: previewText(last),
-        last_from_me: last.from_me,
-        unread_count: this.unreadByChat.get(chat_jid) ?? 0,
-        message_count: msgs.length,
-      });
-    }
-    summaries.sort((a, b) => b.last_timestamp.localeCompare(a.last_timestamp));
-    return summaries.slice(0, limit);
+    return this.inbox.listChats(limit);
   }
 
   getChatMessages(chatJid: string, limit = 50): InboxMessage[] {
-    const normalized = this.config.normalizeJid(chatJid);
-    const msgs = this.inbox.get(normalized) ?? this.inbox.get(chatJid) ?? [];
-    return msgs.slice(-limit);
+    const normalized = this.safeNormalizeJid(chatJid) ?? chatJid;
+    const msgs = this.inbox.getMessages(normalized, limit);
+    if (msgs.length > 0 || normalized === chatJid) return msgs;
+    return this.inbox.getMessages(chatJid, limit);
   }
 
   markChatRead(chatJid: string): void {
-    const normalized = this.config.normalizeJid(chatJid);
-    this.unreadByChat.delete(normalized);
-    this.unreadByChat.delete(chatJid);
+    const normalized = this.safeNormalizeJid(chatJid) ?? chatJid;
+    this.inbox.markRead(normalized);
+    if (normalized !== chatJid) this.inbox.markRead(chatJid);
+  }
+
+  private safeNormalizeJid(chatJid: string): string | null {
+    try {
+      return this.config.normalizeJid(chatJid);
+    } catch {
+      return null;
+    }
   }
 
   getInboxOverview(): { total_messages: number; chats: number; total_unread: number } {
-    let unread = 0;
-    for (const n of this.unreadByChat.values()) unread += n;
-    return { total_messages: this.inboxTotalCount, chats: this.inbox.size, total_unread: unread };
+    return this.inbox.overview();
   }
 
   getMessageStatus(messageId: string): StatusEntry | undefined {
-    return this.statusMap.get(messageId);
+    return this.statuses.get(messageId);
   }
 
   getAllStatuses(): Array<{ message_id: string } & StatusEntry> {
-    return [...this.statusMap.entries()].map(([id, e]) => ({ message_id: id, ...e }));
+    return this.statuses.all();
   }
 
   async logout(): Promise<void> {
@@ -368,16 +330,27 @@ export class WhatsAppService {
     } catch (err) {
       this.logger.warn({ err }, 'Error during logout, clearing state anyway');
     }
+    this.teardownSocket();
     const cfg = this.config.getConfig();
     await fs.rm(cfg.sessionDir, { recursive: true, force: true });
     this.connectionState = 'logged_out';
     this.currentQr = null;
     this.me = null;
-    this.statusMap.clear();
+    this.statuses.clear();
     this.inbox.clear();
-    this.unreadByChat.clear();
-    this.inboxTotalCount = 0;
     this.logger.info('Logged out and session cleared');
+  }
+
+  async dispose(): Promise<void> {
+    this.shutdown = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.messageLimiter.dispose();
+    this.mediaLimiter.dispose();
+    this.rejectReadyWaiters(new Error('Service disposed'));
+    this.teardownSocket();
   }
 
   getConnectionState(): ConnectionState {
@@ -402,7 +375,10 @@ export class WhatsAppService {
     connection: ConnectionState;
     me: { id: string; name?: string } | null;
     circuitBreaker: ReturnType<CircuitBreaker['getMetrics']>;
-    rateLimiter: { messages: ReturnType<RateLimiter['getStatus']>; media: ReturnType<RateLimiter['getStatus']> };
+    rateLimiter: {
+      messages: ReturnType<RateLimiter['getStatus']>;
+      media: ReturnType<RateLimiter['getStatus']>;
+    };
     pendingMessages: number;
   } {
     return {
@@ -413,7 +389,7 @@ export class WhatsAppService {
         messages: this.messageLimiter.getStatus(),
         media: this.mediaLimiter.getStatus(),
       },
-      pendingMessages: [...this.statusMap.values()].filter((s) => s.status === 'pending' || s.status === 'server_ack').length,
+      pendingMessages: this.statuses.pendingCount(),
     };
   }
 
@@ -427,7 +403,7 @@ export class WhatsAppService {
     if (this.connectionState === 'logged_out') {
       throw new Error('WhatsApp is logged out. Restart the server and scan the QR code.');
     }
-    await this.waitReady(15_000).catch((err) => {
+    await this.waitReady(DEFAULT_ENSURE_READY_MS).catch((err) => {
       throw new Error(`WhatsApp not ready: ${err.message}`);
     });
   }
@@ -435,30 +411,25 @@ export class WhatsAppService {
   private recordSent(sent: proto.WebMessageInfo | undefined, jid: string): SentMessage {
     if (!sent || !sent.key?.id) throw new Error('Send failed: no message ID returned');
     const id = sent.key.id;
-    const entry: StatusEntry = {
-      status: 'pending',
-      updatedAt: new Date().toISOString(),
-      to_jid: jid,
-    };
-    this.statusMap.set(id, entry);
+    const entry = this.statuses.record(id, jid);
     return { message_id: id, to_jid: jid, timestamp: entry.updatedAt, status: 'pending' };
   }
 
-  private async validateMediaFile(filePath: string): Promise<void> {
-    try {
-      await fs.access(filePath);
-    } catch {
-      throw new Error(`File not found: ${filePath}`);
-    }
-    const mimeType = (mime.lookup(filePath) || '').toString();
+  private async validateMediaFile(filePath: string): Promise<string> {
+    const cfg = this.config.getConfig();
+    const safePath = await resolveSafePath(filePath, {
+      allowedDirs: cfg.media.allowedDirs,
+      blockSymlinksOutsideAllowed: true,
+    });
+    const mimeType = (mime.lookup(safePath) || '').toString();
     if (!mimeType || !this.config.isAllowedMimeType(mimeType)) {
       throw new Error(`Unsupported media type: "${mimeType || 'unknown'}" for ${filePath}`);
     }
-    const stat = await fs.stat(filePath);
-    const max = this.config.getConfig().media.maxSize;
-    if (stat.size > max) {
-      throw new Error(`File too large: ${stat.size} bytes (max ${max})`);
+    const stat = await fs.stat(safePath);
+    if (stat.size > cfg.media.maxSize) {
+      throw new Error(`File too large: ${stat.size} bytes (max ${cfg.media.maxSize})`);
     }
+    return safePath;
   }
 }
 
@@ -471,13 +442,19 @@ function validateText(text: string): void {
   }
 }
 
+type MediaContent =
+  | { image: Buffer; caption?: string; mimetype: string }
+  | { document: Buffer; fileName: string; mimetype: string; caption?: string }
+  | { audio: Buffer; mimetype: string; ptt: false }
+  | { video: Buffer; caption?: string; mimetype: string };
+
 function buildMediaContent(
   type: MediaType,
   buffer: Buffer,
   mimeType: string,
   filename: string,
   caption?: string,
-): any {
+): MediaContent {
   switch (type) {
     case 'image':
       return { image: buffer, caption, mimetype: mimeType };
@@ -487,100 +464,5 @@ function buildMediaContent(
       return { audio: buffer, mimetype: mimeType, ptt: false };
     case 'video':
       return { video: buffer, caption, mimetype: mimeType };
-  }
-}
-
-function normalizeInboxMessage(m: proto.IWebMessageInfo): InboxMessage | null {
-  const id = m.key?.id;
-  const chat_jid = m.key?.remoteJid;
-  if (!id || !chat_jid) return null;
-
-  const from_me = !!m.key?.fromMe;
-  const from_jid = from_me
-    ? (m.key?.remoteJid ?? '')
-    : (m.key?.participant ?? m.key?.remoteJid ?? '');
-
-  const tsRaw = m.messageTimestamp;
-  const tsNum = typeof tsRaw === 'number'
-    ? tsRaw
-    : tsRaw && typeof (tsRaw as any).toNumber === 'function'
-      ? (tsRaw as any).toNumber()
-      : Math.floor(Date.now() / 1000);
-  const timestamp = new Date(tsNum * 1000).toISOString();
-
-  const msg = m.message;
-  let type: InboxMessageType = 'other';
-  let text: string | null = null;
-  let media_filename: string | null = null;
-
-  if (msg?.conversation) {
-    type = 'text';
-    text = msg.conversation;
-  } else if (msg?.extendedTextMessage?.text) {
-    type = 'text';
-    text = msg.extendedTextMessage.text;
-  } else if (msg?.imageMessage) {
-    type = 'image';
-    text = msg.imageMessage.caption ?? null;
-  } else if (msg?.videoMessage) {
-    type = 'video';
-    text = msg.videoMessage.caption ?? null;
-  } else if (msg?.audioMessage) {
-    type = 'audio';
-  } else if (msg?.documentMessage) {
-    type = 'document';
-    text = msg.documentMessage.caption ?? null;
-    media_filename = msg.documentMessage.fileName ?? null;
-  } else if (msg?.documentWithCaptionMessage?.message?.documentMessage) {
-    type = 'document';
-    const doc = msg.documentWithCaptionMessage.message.documentMessage;
-    text = doc.caption ?? null;
-    media_filename = doc.fileName ?? null;
-  } else if (msg?.stickerMessage) {
-    type = 'sticker';
-  } else if (msg?.locationMessage) {
-    type = 'location';
-  } else if (msg?.contactMessage || msg?.contactsArrayMessage) {
-    type = 'contact';
-  }
-
-  return {
-    id,
-    chat_jid,
-    from_jid,
-    from_me,
-    timestamp,
-    type,
-    text,
-    pushName: m.pushName ?? null,
-    media_filename,
-  };
-}
-
-function previewText(m: InboxMessage): string | null {
-  if (m.text) return m.text.length > 120 ? m.text.slice(0, 117) + '...' : m.text;
-  switch (m.type) {
-    case 'image': return '[image]';
-    case 'video': return '[video]';
-    case 'audio': return '[audio]';
-    case 'document': return m.media_filename ? `[document: ${m.media_filename}]` : '[document]';
-    case 'sticker': return '[sticker]';
-    case 'location': return '[location]';
-    case 'contact': return '[contact]';
-    default: return '[unsupported message type]';
-  }
-}
-
-function mapProtoStatus(status: proto.WebMessageInfo.Status | number | null | undefined): MessageStatus | null {
-  if (status === null || status === undefined) return null;
-  // 0 ERROR, 1 PENDING, 2 SERVER_ACK, 3 DELIVERY_ACK, 4 READ, 5 PLAYED
-  switch (status) {
-    case 0: return 'error';
-    case 1: return 'pending';
-    case 2: return 'server_ack';
-    case 3: return 'delivered';
-    case 4: return 'read';
-    case 5: return 'played';
-    default: return null;
   }
 }

@@ -1,7 +1,8 @@
 # mcp-whatsapp
 
+[![CI](https://github.com/ftaricano/mcp-whatsapp/actions/workflows/ci.yml/badge.svg)](https://github.com/ftaricano/mcp-whatsapp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/node-%E2%89%A518-brightgreen.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A518.3-brightgreen.svg)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2.svg)](https://modelcontextprotocol.io)
 
 Integração com WhatsApp via Baileys (autenticação por QR code). Distribui dois binários:
@@ -15,7 +16,7 @@ Sem token oficial da Meta, sem aprovação de Business account — usa a mesma s
 
 ## Requisitos
 
-- Node.js ≥ 18
+- Node.js ≥ 18.3 (fetch/AbortSignal estável — Baileys ≥ 7 depende disso)
 - Um WhatsApp instalado no celular para escanear o QR (WhatsApp → Configurações → **Aparelhos conectados**)
 
 ## Instalação
@@ -123,7 +124,7 @@ Nenhuma variável de ambiente é obrigatória. Veja [.env.example](.env.example)
   "filename": "boleto-2026-04.pdf"
 }}
 
-// Cobrança
+// Cobrança (interest_policy opcional — default: 2% multa + 1% ao mês)
 { "tool": "send_billing_alert", "arguments": {
   "to": "+5521999999999",
   "amount": 299.90,
@@ -131,7 +132,8 @@ Nenhuma variável de ambiente é obrigatória. Veja [.env.example](.env.example)
   "invoice_number": "BOL-2026-0042",
   "name": "João Silva",
   "payment_link": "https://pay.cpz.com.br/bol42",
-  "company_name": "CPZ Seguros"
+  "company_name": "CPZ Seguros",
+  "interest_policy": { "monthlyInterestPct": 1, "penaltyPct": 2 }
 }}
 ```
 
@@ -182,7 +184,37 @@ src/
 npm run dev        # tsc --watch
 npm run build
 npm run clean
+npm run typecheck  # tsc --noEmit
+npm test           # vitest (unit tests)
+npm run test:watch # vitest em modo interativo
+npm run audit:ci   # npm audit --audit-level=high (production-only)
 ```
+
+### Testes
+
+Cobertura atual via [vitest](https://vitest.dev/): **79 unit tests** em `tests/`:
+- `config.test.ts` — `normalizeJid`, `isAllowedMimeType`, `media.allowedDirs`
+- `rate-limiter.test.ts` — FIFO, refill, dispose, fairness
+- `retry.test.ts` — `categorizeError` (todos os ramos) + `RetryHandler`
+- `circuit-breaker.test.ts` — CLOSED/OPEN/HALF_OPEN transições
+- `path-safety.test.ts` — allowlist, traversal, symlinks, null bytes
+- `inbox-store.test.ts` — ring buffer, eviction global, preview
+- `status-tracker.test.ts` — mapeamento proto, FIFO bounded
+- `template-engine.test.ts` — render, overdue, validate, `computeOverdueAmount`
+- `tool-response.test.ts` — envelope padronizado de erro
+
+Rode `npm test` antes de abrir PR. CI roda em Node 20 e 22 via GitHub Actions.
+
+### Configuração sensível
+
+Variáveis que afetam segurança/observabilidade (todas opcionais):
+
+- `WHATSAPP_ALLOWED_DIRS` — colon-separated. Whitelist de diretórios de onde o CLI/MCP pode ler anexos. Default: `$HOME:$(pwd)`. Realpath é aplicado → symlinks que apontam pra fora são bloqueados.
+- `WHATSAPP_LOG_LEVEL` — pino level. **⚠️ Nunca use `debug`/`trace` em produção** — esses níveis logam material de sessão (chaves de criptografia Baileys).
+- `WHATSAPP_DEFAULT_COUNTRY_CODE` — DDI default quando o número não é E.164. Default `55`.
+- `WHATSAPP_SESSION_DIR` — onde salvar a sessão. Default `./auth-state/`. **Não commite.**
+
+Veja [.env.example](.env.example) pra lista completa.
 
 ## Smoke test (sem cliente MCP)
 

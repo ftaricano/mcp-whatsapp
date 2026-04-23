@@ -4,6 +4,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import { WhatsAppService } from '../services/whatsapp-api.js';
 import { TemplateEngine } from '../services/template-engine.js';
+import { fail, failValidation } from '../utils/tool-response.js';
 
 export const sendDocumentReminderTool: Tool = {
   name: 'send_document_reminder',
@@ -21,7 +22,7 @@ export const sendDocumentReminderTool: Tool = {
       name: { type: 'string', description: 'Nome do destinatário (opcional).' },
       custom_message: { type: 'string', maxLength: 1000, description: 'Texto adicional (opcional).' },
       company_name: { type: 'string', description: 'Nome da empresa (opcional).' },
-      attachment_path: { type: 'string', description: 'Arquivo anexo opcional.' },
+      attachment_path: { type: 'string', description: 'Arquivo anexo opcional (sujeito a WHATSAPP_ALLOWED_DIRS).' },
     },
     required: ['to', 'document_type', 'due_date'],
   },
@@ -37,16 +38,17 @@ const schema = z.object({
   attachment_path: z.string().optional(),
 });
 
-export async function handleSendDocumentReminder(service: WhatsAppService, args: unknown): Promise<unknown> {
+export async function handleSendDocumentReminder(
+  service: WhatsAppService,
+  args: unknown,
+): Promise<unknown> {
   const parsed = schema.safeParse(args);
-  if (!parsed.success) {
-    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
-  }
+  if (!parsed.success) return failValidation(parsed.error);
   const data = parsed.data;
 
   const dueDate = new Date(data.due_date);
   if (Number.isNaN(dueDate.getTime())) {
-    return { success: false, error: { type: 'validation_error', message: `Data inválida: ${data.due_date}` } };
+    return failValidation(new Error(`Data inválida: ${data.due_date}`));
   }
 
   const messageText = TemplateEngine.createDocumentReminderMessage({
@@ -60,6 +62,7 @@ export async function handleSendDocumentReminder(service: WhatsAppService, args:
   try {
     let sent;
     let attachmentInfo: { filename: string; size_mb: number } | null = null;
+    let attachmentFailedReason: string | null = null;
 
     if (data.attachment_path) {
       try {
@@ -75,7 +78,11 @@ export async function handleSendDocumentReminder(service: WhatsAppService, args:
           filename: path.basename(data.attachment_path),
           size_mb: Number((stat.size / 1024 / 1024).toFixed(2)),
         };
-      } catch {
+      } catch (err) {
+        // Surface the reason so callers know the attachment was skipped rather
+        // than silently delivering the bare reminder. Security: never include
+        // the full resolved path — only the original input.
+        attachmentFailedReason = err instanceof Error ? err.message : String(err);
         sent = await service.sendMessage({ to: data.to, message: messageText });
       }
     } else {
@@ -97,17 +104,13 @@ export async function handleSendDocumentReminder(service: WhatsAppService, args:
         days_remaining: daysRemaining,
         recipient_name: data.name ?? 'Cliente',
         company_name: data.company_name ?? 'Nossa Empresa',
-        has_attachment: !!data.attachment_path,
+        has_attachment: !!attachmentInfo,
         attachment_info: attachmentInfo,
+        attachment_failed_reason: attachmentFailedReason,
       },
       timestamp: sent.timestamp,
     };
   } catch (err) {
-    return {
-      success: false,
-      error: { type: 'send_failed', message: (err as Error).message },
-      to: data.to,
-      timestamp: new Date().toISOString(),
-    };
+    return fail('send_failed', err, { to: data.to });
   }
 }

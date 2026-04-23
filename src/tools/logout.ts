@@ -1,5 +1,6 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { WhatsAppService } from '../services/whatsapp-api.js';
+import { fail } from '../utils/tool-response.js';
 
 export const logoutTool: Tool = {
   name: 'whatsapp_logout',
@@ -16,10 +17,6 @@ export async function handleLogout(service: WhatsAppService, _args: unknown): Pr
       timestamp: new Date().toISOString(),
     };
   } catch (err) {
-    return {
-      success: false,
-      error: { type: 'logout_failed', message: (err as Error).message },
-      timestamp: new Date().toISOString(),
-    };
+    return fail('logout_failed', err);
   }
 }

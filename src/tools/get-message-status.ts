@@ -1,6 +1,7 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { WhatsAppService } from '../services/whatsapp-api.js';
+import { failValidation } from '../utils/tool-response.js';
 
 export const getMessageStatusTool: Tool = {
   name: 'get_message_status',
@@ -18,9 +19,7 @@ const schema = z.object({ message_id: z.string().min(1) });
 
 export async function handleGetMessageStatus(service: WhatsAppService, args: unknown): Promise<unknown> {
   const parsed = schema.safeParse(args);
-  if (!parsed.success) {
-    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
-  }
+  if (!parsed.success) return failValidation(parsed.error);
   const entry = service.getMessageStatus(parsed.data.message_id);
   if (!entry) {
     return {
