@@ -54,20 +54,24 @@ export class InboxStore {
   }
 
   append(msg: InboxMessage): void {
-    const list = this.chats.get(msg.chat_jid);
-    if (!list) {
+    const existing = this.chats.get(msg.chat_jid);
+    if (!existing) {
       this.chats.set(msg.chat_jid, [msg]);
       this.heads.set(msg.chat_jid, 0);
     } else {
+      existing.push(msg);
       const head = this.heads.get(msg.chat_jid) ?? 0;
-      const len = list.length - head;
-      if (len >= this.perChatLimit) {
-        // Overwrite the oldest slot in place; bump head.
-        list[head] = msg;
+      if (existing.length - head > this.perChatLimit) {
+        // Evict the oldest by advancing head; the new message stays in the
+        // live window (everything after head). Compaction happens lazily
+        // to keep the underlying array bounded.
         this.heads.set(msg.chat_jid, head + 1);
-        this.total--; // the overwritten one no longer counts
-      } else {
-        list.push(msg);
+        this.total--; // the evicted one no longer counts
+        if (head + 1 > this.perChatLimit * 2) {
+          const live = existing.slice(head + 1);
+          this.chats.set(msg.chat_jid, live);
+          this.heads.set(msg.chat_jid, 0);
+        }
       }
     }
     this.total++;

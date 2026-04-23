@@ -38,8 +38,11 @@ describe('resolveSafePath', () => {
   let symlinkInside: string;
 
   beforeAll(async () => {
-    // Realpath the tmp root on macOS (/var is a symlink to /private/var).
-    tmpRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ps-test-')));
+    // NOTE: intentionally do NOT realpath here — we want the allowlist we
+    // pass into resolveSafePath() to contain the symlinked path (on macOS
+    // /var → /private/var). The production code must realpath the allowlist
+    // itself; if it regresses, these tests will fail.
+    tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ps-test-'));
     allowedDir = path.join(tmpRoot, 'allowed');
     const outsideDir = path.join(tmpRoot, 'outside');
     await fs.mkdir(allowedDir);
@@ -70,7 +73,7 @@ describe('resolveSafePath', () => {
       .rejects.toThrow(/null byte/);
   });
 
-  it('allows files inside allowedDirs', async () => {
+  it('allows files inside allowedDirs even when the allowlist is a symlink', async () => {
     const p = await resolveSafePath(allowedFile, {
       allowedDirs: [allowedDir],
       blockSymlinksOutsideAllowed: true,

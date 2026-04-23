@@ -41,7 +41,19 @@ export async function resolveSafePath(
   }
 
   const normalizedReal = path.normalize(real);
-  const ok = policy.allowedDirs.some((dir) => isWithin(normalizedReal, dir));
+  // Realpath allowed dirs too — on macOS /var → /private/var, and any user
+  // might point WHATSAPP_ALLOWED_DIRS at a symlink. Without this the file's
+  // real path is compared against a symlinked parent and falsely rejected.
+  const realDirs = await Promise.all(
+    policy.allowedDirs.map(async (dir) => {
+      try {
+        return path.normalize(await fs.realpath(dir));
+      } catch {
+        return path.normalize(path.resolve(dir));
+      }
+    }),
+  );
+  const ok = realDirs.some((dir) => isWithin(normalizedReal, dir));
   if (!ok) {
     throw new Error(
       `File path is outside the allowed directories: ${input}. ` +

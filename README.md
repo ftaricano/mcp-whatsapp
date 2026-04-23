@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ftaricano/mcp-whatsapp/actions/workflows/ci.yml/badge.svg)](https://github.com/ftaricano/mcp-whatsapp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/node-%E2%89%A518.3-brightgreen.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2.svg)](https://modelcontextprotocol.io)
 
 Integração com WhatsApp via Baileys (autenticação por QR code). Distribui dois binários:
@@ -16,7 +16,7 @@ Sem token oficial da Meta, sem aprovação de Business account — usa a mesma s
 
 ## Requisitos
 
-- Node.js ≥ 18.3 (fetch/AbortSignal estável — Baileys ≥ 7 depende disso)
+- Node.js ≥ 20 (exigência transitiva do `@modelcontextprotocol/sdk` 1.x + `@hono/node-server`)
 - Um WhatsApp instalado no celular para escanear o QR (WhatsApp → Configurações → **Aparelhos conectados**)
 
 ## Instalação

@@ -33,17 +33,24 @@ describe('InboxStore', () => {
     expect(s.overview().total_unread).toBe(0);
   });
 
-  it('enforces per-chat limit (ring buffer)', () => {
+  it('enforces per-chat limit keeping the N most recent messages in order', () => {
     const s = new InboxStore(3, 100);
     for (let i = 0; i < 5; i++) {
       s.append(mk({ id: String(i), timestamp: new Date(2026, 0, 1, 0, i).toISOString() }));
     }
     const msgs = s.getMessages('5521@s.whatsapp.net', 10);
-    // Ring buffer: after 5 inserts with cap 3, oldest two ('0','1') evicted,
-    // but the overwrite-then-push pattern yields the current live sequence.
-    expect(msgs.length).toBe(3);
-    expect(msgs.map((m) => m.id)).not.toContain('0');
-    expect(msgs.map((m) => m.id)).toContain('4');
+    // After 5 inserts with cap 3, we must see ids 2/3/4 in order — every
+    // newly appended message MUST remain in the live window.
+    expect(msgs.map((m) => m.id)).toEqual(['2', '3', '4']);
+  });
+
+  it('listChats reports the newest message after eviction', () => {
+    const s = new InboxStore(2, 100);
+    s.append(mk({ id: 'old', timestamp: '2026-01-01T00:00:00Z' }));
+    s.append(mk({ id: 'mid', timestamp: '2026-01-01T00:01:00Z' }));
+    s.append(mk({ id: 'new', timestamp: '2026-01-01T00:02:00Z' }));
+    const preview = s.listChats(10)[0].last_timestamp;
+    expect(preview).toBe('2026-01-01T00:02:00Z');
   });
 
   it('enforces global cap by evicting oldest timestamp across chats', () => {
