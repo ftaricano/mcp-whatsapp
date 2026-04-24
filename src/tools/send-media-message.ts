@@ -4,10 +4,14 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as mime from 'mime-types';
 import { WhatsAppService } from '../services/whatsapp-api.js';
+import { fail, failValidation } from '../utils/tool-response.js';
 
 export const sendMediaMessageTool: Tool = {
   name: 'send_media_message',
-  description: 'Enviar anexo (imagem, documento, áudio ou vídeo) até 15MB.',
+  description:
+    'Enviar anexo (imagem, documento, áudio ou vídeo) até 15MB. Caminhos ' +
+    'são validados contra WHATSAPP_ALLOWED_DIRS (default: HOME + CWD) para ' +
+    'prevenir leitura de arquivos sensíveis.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,7 +22,7 @@ export const sendMediaMessageTool: Tool = {
       },
       media_path: {
         type: 'string',
-        description: 'Caminho absoluto do arquivo (máx 15MB).',
+        description: 'Caminho absoluto do arquivo (máx 15MB, dentro de WHATSAPP_ALLOWED_DIRS).',
       },
       media_type: {
         type: 'string',
@@ -47,11 +51,12 @@ const schema = z.object({
   filename: z.string().optional(),
 });
 
-export async function handleSendMediaMessage(service: WhatsAppService, args: unknown): Promise<unknown> {
+export async function handleSendMediaMessage(
+  service: WhatsAppService,
+  args: unknown,
+): Promise<unknown> {
   const parsed = schema.safeParse(args);
-  if (!parsed.success) {
-    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
-  }
+  if (!parsed.success) return failValidation(parsed.error);
   const data = parsed.data;
   try {
     const sent = await service.sendMediaMessage({
@@ -78,12 +83,6 @@ export async function handleSendMediaMessage(service: WhatsAppService, args: unk
       timestamp: sent.timestamp,
     };
   } catch (err) {
-    return {
-      success: false,
-      error: { type: 'send_failed', message: (err as Error).message },
-      to: data.to,
-      media_path: data.media_path,
-      timestamp: new Date().toISOString(),
-    };
+    return fail('send_failed', err, { to: data.to, media_path: data.media_path });
   }
 }

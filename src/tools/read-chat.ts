@@ -1,6 +1,7 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { WhatsAppService } from '../services/whatsapp-api.js';
+import { failValidation } from '../utils/tool-response.js';
 
 export const readChatTool: Tool = {
   name: 'read_chat',
@@ -25,9 +26,7 @@ const schema = z.object({
 
 export async function handleReadChat(service: WhatsAppService, args: unknown): Promise<unknown> {
   const parsed = schema.safeParse(args);
-  if (!parsed.success) {
-    return { success: false, error: { type: 'validation_error', message: parsed.error.message } };
-  }
+  if (!parsed.success) return failValidation(parsed.error);
   const { chat_jid, limit = 50, mark_read = false } = parsed.data;
   const messages = service.getChatMessages(chat_jid, limit);
   if (mark_read) service.markChatRead(chat_jid);

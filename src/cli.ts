@@ -229,6 +229,11 @@ async function main(): Promise<void> {
   } finally {
     // Allow send acks to land before we tear down
     await new Promise((r) => setTimeout(r, 1500));
+    try {
+      await service.dispose();
+    } catch {
+      /* ignore — best-effort cleanup */
+    }
     process.exit(process.exitCode ?? 0);
   }
 }

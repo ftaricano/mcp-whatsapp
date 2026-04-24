@@ -1,5 +1,6 @@
 import * as path from 'path';
 import { z } from 'zod';
+import { parseAllowedDirs } from '../utils/path-safety.js';
 
 const ConfigSchema = z.object({
   sessionDir: z.string(),
@@ -17,6 +18,7 @@ const ConfigSchema = z.object({
   media: z.object({
     maxSize: z.number().int().positive(),
     allowedMimeTypes: z.array(z.string()),
+    allowedDirs: z.array(z.string()).min(1),
   }),
   logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']),
   defaultCountryCode: z.string().regex(/^\d{1,3}$/),
@@ -24,6 +26,10 @@ const ConfigSchema = z.object({
 
 export type WhatsAppConfig = z.infer<typeof ConfigSchema>;
 
+// `text/plain` was removed intentionally: combined with absolute-path media
+// inputs it allowed exfiltration of arbitrary text files (/etc/passwd, dotfiles,
+// .env). Re-enable explicitly if you really need it. `text/csv` stays because
+// it is a common business attachment and less of a credential vector.
 const DEFAULT_ALLOWED_MIME = [
   'image/jpeg', 'image/png', 'image/webp',
   'application/pdf',
@@ -33,7 +39,7 @@ const DEFAULT_ALLOWED_MIME = [
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.ms-powerpoint',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'text/plain', 'text/csv',
+  'text/csv',
   'audio/mpeg', 'audio/mp4', 'audio/amr', 'audio/ogg', 'audio/ogg; codecs=opus',
   'video/mp4', 'video/3gpp',
 ];
@@ -68,6 +74,7 @@ export class ConfigManager {
       media: {
         maxSize: num(process.env.WHATSAPP_MAX_MEDIA_SIZE, 15 * 1024 * 1024),
         allowedMimeTypes: DEFAULT_ALLOWED_MIME,
+        allowedDirs: parseAllowedDirs(process.env.WHATSAPP_ALLOWED_DIRS),
       },
       logLevel: (process.env.WHATSAPP_LOG_LEVEL ?? 'info') as WhatsAppConfig['logLevel'],
       defaultCountryCode: process.env.WHATSAPP_DEFAULT_COUNTRY_CODE ?? '55',
@@ -86,15 +93,40 @@ export class ConfigManager {
 
   /**
    * Normalize a phone number to WhatsApp JID format: "<digits>@s.whatsapp.net".
-   * Accepts E.164 ("+5521...") or bare digits. Applies defaultCountryCode if
-   * the number is clearly local (fewer than 11 digits).
+   * Accepts E.164 ("+5521...") or bare digits. Applies defaultCountryCode only
+   * when the number is clearly a local subscriber number (10–11 digits,
+   * typical for Brazil DDD+number, with or without the 9-prefix).
+   *
+   * Rejects obviously-malformed inputs (< 8 or > 15 digits after stripping).
+   * E.164 max is 15; min national significant numbers are 7, we add a
+   * defensive floor of 8 to catch placeholders like "11111111".
    */
   normalizeJid(phone: string): string {
-    if (phone.endsWith('@s.whatsapp.net') || phone.endsWith('@g.us')) return phone;
-    const digits = phone.replace(/\D+/g, '');
+    if (typeof phone !== 'string') throw new Error('Phone must be a string');
+    const trimmed = phone.trim();
+    if (trimmed.endsWith('@s.whatsapp.net') || trimmed.endsWith('@g.us')) {
+      const prefix = trimmed.split('@')[0] ?? '';
+      if (!/^\d+$/.test(prefix) || prefix.length < 8 || prefix.length > 18) {
+        throw new Error(`Invalid JID: "${phone}"`);
+      }
+      return trimmed;
+    }
+    const digits = trimmed.replace(/\D+/g, '');
     if (digits.length === 0) throw new Error(`Invalid phone: "${phone}"`);
-    const withCC = digits.length <= 11 ? `${this.config.defaultCountryCode}${digits}` : digits;
-    return `${withCC}@s.whatsapp.net`;
+
+    let full: string;
+    if (digits.length >= 10 && digits.length <= 11) {
+      full = `${this.config.defaultCountryCode}${digits}`;
+    } else {
+      full = digits;
+    }
+
+    if (full.length < 8 || full.length > 15) {
+      throw new Error(
+        `Invalid phone "${phone}" — expected 8–15 digits after normalization, got ${full.length}`,
+      );
+    }
+    return `${full}@s.whatsapp.net`;
   }
 
   isAllowedMimeType(mime: string): boolean {

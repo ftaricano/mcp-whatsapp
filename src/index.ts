@@ -7,7 +7,7 @@ import { setupTools } from './tools/index.js';
 import { setupResources } from './resources/index.js';
 
 const SERVER_NAME = 'mcp-whatsapp';
-const SERVER_VERSION = '2.0.0';
+const SERVER_VERSION = '2.1.0';
 
 async function main(): Promise<void> {
   process.stderr.write(`[${SERVER_NAME}] starting v${SERVER_VERSION}\n`);
@@ -28,12 +28,20 @@ async function main(): Promise<void> {
   setupTools(server, service);
   setupResources(server, service);
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     process.stderr.write(`[${SERVER_NAME}] received ${signal}, shutting down\n`);
     try {
       await server.close();
     } catch {
-      // ignore
+      /* ignore */
+    }
+    try {
+      await service.dispose();
+    } catch {
+      /* ignore */
     }
     process.exit(0);
   };
