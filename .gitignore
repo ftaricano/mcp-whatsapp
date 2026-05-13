@@ -34,4 +34,5 @@ coverage/
 .wwebjs_auth/
 auth-state/
 session.json
-tokens.json
+tokens.json.claude/
+.codex/
