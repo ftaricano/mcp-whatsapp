@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2.svg)](https://modelcontextprotocol.io)
+[![npm](https://img.shields.io/npm/v/%40ftaricano%2Fmcp-whatsapp.svg)](https://www.npmjs.com/package/@ftaricano/mcp-whatsapp)
 
 Integração com WhatsApp via Baileys (autenticação por QR code). Distribui dois binários:
 
@@ -13,6 +14,8 @@ Integração com WhatsApp via Baileys (autenticação por QR code). Distribui do
 Sem token oficial da Meta, sem aprovação de Business account — usa a mesma sessão do WhatsApp Web. Funciona com **WhatsApp pessoal ou Business** (qualquer conta que pareia em "Aparelhos conectados"). Ideal para disparo controlado de mensagens, lembretes de documentos e alertas de cobrança pra contatos que já te conhecem.
 
 > ⚠️ **Uso responsável.** WhatsApp bane números por comportamento de spam, não por "biblioteca usada". Mantenha volume moderado (o rate limiter default é 2 msg/s), não mande pra quem não te conhece, e respeite opt-outs. Para disparo em massa de campanhas, use a Cloud API oficial.
+>
+> ⚠️ **Supply chain.** O pacote npm sem escopo `mcp-whatsapp` já existe e **não é este projeto**. Para npm, use `@ftaricano/mcp-whatsapp` ou instale direto do GitHub.
 
 ## Requisitos
 
@@ -20,6 +23,18 @@ Sem token oficial da Meta, sem aprovação de Business account — usa a mesma s
 - Um WhatsApp instalado no celular para escanear o QR (WhatsApp → Configurações → **Aparelhos conectados**)
 
 ## Instalação
+
+### Via npm/GitHub
+
+```bash
+# pacote escopado deste projeto (quando publicado no npm)
+npm install -g @ftaricano/mcp-whatsapp
+
+# ou direto do GitHub
+npm install -g github:ftaricano/mcp-whatsapp
+```
+
+### Via clone local
 
 ```bash
 git clone https://github.com/ftaricano/mcp-whatsapp.git
@@ -48,6 +63,8 @@ Um QR code ASCII aparece no **stderr**. No celular:
 A sessão é salva em `./auth-state/` (configurável via `WHATSAPP_SESSION_DIR`). Próximas execuções não pedem QR — conecta direto.
 
 Para ler o QR como PNG (ex: num cliente MCP), leia o resource `whatsapp://qr` — retorna `data_url` (base64 PNG).
+
+Não compartilhe prints, logs ou `data_url` do QR: enquanto válido, ele funciona como credencial de pareamento.
 
 ## Uso via CLI (recomendado pra maioria dos casos)
 
@@ -85,13 +102,17 @@ Necessário quando você precisa de inbox em tempo real (`list_chats`, `read_cha
   "mcpServers": {
     "whatsapp": {
       "command": "node",
-      "args": ["/caminho/absoluto/para/mcp-whatsapp/build/index.js"]
+      "args": ["/caminho/absoluto/para/mcp-whatsapp/build/index.js"],
+      "env": {
+        "WHATSAPP_ALLOWED_RECIPIENTS": "+5521999999999",
+        "WHATSAPP_ALLOWED_DIRS": "/caminho/absoluto/para/anexos"
+      }
     }
   }
 }
 ```
 
-Nenhuma variável de ambiente é obrigatória. Veja [.env.example](.env.example) para opções.
+Nenhuma variável de ambiente é obrigatória, mas em MCP é recomendado configurar `WHATSAPP_ALLOWED_RECIPIENTS` e `WHATSAPP_ALLOWED_DIRS`. Veja [.env.example](.env.example) para opções.
 
 ## Tools
 
@@ -102,6 +123,8 @@ Nenhuma variável de ambiente é obrigatória. Veja [.env.example](.env.example)
 | `send_document_reminder` | Template formatado de lembrete de documento |
 | `send_billing_alert` | Template formatado de cobrança/boleto |
 | `get_message_status` | Status de entrega de uma msg enviada na sessão atual |
+| `list_chats` | Lista chats com mensagens recebidas desde o start do servidor |
+| `read_chat` | Lê mensagens bufferizadas em memória para um chat |
 | `whatsapp_logout` | Desconecta e apaga sessão local (próxima execução exige QR) |
 
 **Formato de número**: aceita E.164 (`+5521999999999`) ou dígitos puros (`5521999999999`, `21999999999` — nesse último caso aplica o DDI default do `WHATSAPP_DEFAULT_COUNTRY_CODE`, padrão `55`).
@@ -171,12 +194,16 @@ src/
 - **Retry** com exponential backoff + jitter; não retenta erros 4xx/auth
 - **Reconnect automático** em queda de socket (exceto logout)
 - **Sessão persistida** em arquivos multi-file auth state
+- **Allowlist opcional de destinatários** (`WHATSAPP_ALLOWED_RECIPIENTS`) para uso com agentes/MCP
 
 ### Limitações conhecidas
 
-- `get_message_status` só conhece mensagens desta sessão (estado em memória). Reiniciou, perdeu.
-- `whatsapp-web.js`-style: status recebidos via eventos `messages.update` — propagação pode levar segundos.
-- Grupos: não testados. JID de grupo (`...@g.us`) é aceito pela normalização mas flows voltados a grupos não foram validados.
+- Baileys não é API oficial da Meta. Mudanças no WhatsApp Web podem quebrar pareamento/envio sem aviso.
+- O pacote envia mensagens reais do número pareado; não há sandbox da Meta nesta rota.
+- `get_message_status`, `list_chats` e `read_chat` só conhecem eventos desta execução do servidor (estado em memória). Reiniciou, perdeu.
+- Status chegam via eventos `messages.update`; propagação pode levar segundos e nem todo caso vira "delivered/read".
+- Grupos ficam bloqueados por default. Defina `WHATSAPP_ENABLE_GROUPS=true` para permitir JIDs `...@g.us`; fluxos de grupo seguem menos testados que conversas 1:1.
+- O pacote npm canônico é `@ftaricano/mcp-whatsapp`; o nome sem escopo `mcp-whatsapp` no npm pertence a outro projeto.
 
 ## Desenvolvimento
 
@@ -192,8 +219,8 @@ npm run audit:ci   # npm audit --audit-level=high (production-only)
 
 ### Testes
 
-Cobertura atual via [vitest](https://vitest.dev/): **79 unit tests** em `tests/`:
-- `config.test.ts` — `normalizeJid`, `isAllowedMimeType`, `media.allowedDirs`
+Cobertura atual via [vitest](https://vitest.dev/): **85 unit tests** em `tests/`:
+- `config.test.ts` — `normalizeJid`, `validateRecipient`, `isAllowedMimeType`, `media.allowedDirs`
 - `rate-limiter.test.ts` — FIFO, refill, dispose, fairness
 - `retry.test.ts` — `categorizeError` (todos os ramos) + `RetryHandler`
 - `circuit-breaker.test.ts` — CLOSED/OPEN/HALF_OPEN transições
@@ -201,6 +228,7 @@ Cobertura atual via [vitest](https://vitest.dev/): **79 unit tests** em `tests/`
 - `inbox-store.test.ts` — ring buffer, eviction global, preview
 - `status-tracker.test.ts` — mapeamento proto, FIFO bounded
 - `template-engine.test.ts` — render, overdue, validate, `computeOverdueAmount`
+- `send-document-reminder.test.ts` — não faz `stat` de anexo antes da validação de path
 - `tool-response.test.ts` — envelope padronizado de erro
 
 Rode `npm test` antes de abrir PR. CI roda em Node 20 e 22 via GitHub Actions.
@@ -209,7 +237,9 @@ Rode `npm test` antes de abrir PR. CI roda em Node 20 e 22 via GitHub Actions.
 
 Variáveis que afetam segurança/observabilidade (todas opcionais):
 
-- `WHATSAPP_ALLOWED_DIRS` — colon-separated. Whitelist de diretórios de onde o CLI/MCP pode ler anexos. Default: `$HOME:$(pwd)`. Realpath é aplicado → symlinks que apontam pra fora são bloqueados.
+- `WHATSAPP_ALLOWED_DIRS` — colon-separated. Whitelist de diretórios de onde o CLI/MCP pode ler anexos. Default: `$(pwd)` do processo. Realpath é aplicado → symlinks que apontam pra fora são bloqueados.
+- `WHATSAPP_ALLOWED_RECIPIENTS` — lista separada por vírgula de números/JIDs permitidos. Default vazio = sem allowlist.
+- `WHATSAPP_ENABLE_GROUPS` — `true` libera envio para JIDs de grupo (`...@g.us`). Default `false`.
 - `WHATSAPP_LOG_LEVEL` — pino level. **⚠️ Nunca use `debug`/`trace` em produção** — esses níveis logam material de sessão (chaves de criptografia Baileys).
 - `WHATSAPP_DEFAULT_COUNTRY_CODE` — DDI default quando o número não é E.164. Default `55`.
 - `WHATSAPP_SESSION_DIR` — onde salvar a sessão. Default `./auth-state/`. **Não commite.**
@@ -257,16 +287,22 @@ npm run smoke -- logout
 
 - **Nunca commite** `auth-state/` — contém as credenciais da sessão (equivale à chave do seu WhatsApp).
 - O diretório de sessão default é `./auth-state/` e já está no `.gitignore`.
+- Mantenha `WHATSAPP_ALLOWED_DIRS` restrito ao menor diretório necessário. O default é apenas o `cwd` onde o processo iniciou.
+- Para agentes/MCP, prefira `WHATSAPP_ALLOWED_RECIPIENTS` com uma lista curta de destinatários aprovados.
 - Em caso de suspeita de vazamento, rode `whatsapp logout` (apaga local) **e** desconecte o aparelho em *WhatsApp → Aparelhos conectados*.
 - Encontrou vulnerabilidade? Abra uma [security advisory privada](https://github.com/ftaricano/mcp-whatsapp/security/advisories/new) — não reporte em issue pública.
+
+Leia [SECURITY.md](SECURITY.md) antes de publicar logs, issues ou exemplos com QR/sessão.
 
 ## Contribuindo
 
 PRs bem-vindos. Antes de abrir:
 
 1. `npm run build` passa sem erro
-2. `npm run smoke -- status` funciona numa sessão pareada
-3. Descrição do PR explica o *porquê*, não só o *o quê*
+2. `npm run typecheck` e `npm test` passam
+3. `npm run audit:ci` não reporta vulnerabilidades high em production deps
+4. `npm run smoke -- status` funciona numa sessão pareada, quando a mudança tocar runtime real
+5. Descrição do PR explica o *porquê*, não só o *o quê*
 
 Bugs e feature requests em [Issues](https://github.com/ftaricano/mcp-whatsapp/issues).
 

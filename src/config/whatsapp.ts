@@ -20,6 +20,10 @@ const ConfigSchema = z.object({
     allowedMimeTypes: z.array(z.string()),
     allowedDirs: z.array(z.string()).min(1),
   }),
+  safety: z.object({
+    allowedRecipients: z.array(z.string()),
+    allowGroups: z.boolean(),
+  }),
   logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']),
   defaultCountryCode: z.string().regex(/^\d{1,3}$/),
 });
@@ -51,6 +55,18 @@ function num(env: string | undefined, fallback: number): number {
   return n;
 }
 
+function bool(env: string | undefined, fallback: boolean): boolean {
+  if (env === undefined || env === '') return fallback;
+  if (/^(1|true|yes|on)$/i.test(env)) return true;
+  if (/^(0|false|no|off)$/i.test(env)) return false;
+  throw new Error(`Invalid boolean for env var: "${env}"`);
+}
+
+function list(env: string | undefined): string[] {
+  if (!env) return [];
+  return env.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
 export class ConfigManager {
   private static instance: ConfigManager | null = null;
   private readonly config: WhatsAppConfig;
@@ -75,6 +91,10 @@ export class ConfigManager {
         maxSize: num(process.env.WHATSAPP_MAX_MEDIA_SIZE, 15 * 1024 * 1024),
         allowedMimeTypes: DEFAULT_ALLOWED_MIME,
         allowedDirs: parseAllowedDirs(process.env.WHATSAPP_ALLOWED_DIRS),
+      },
+      safety: {
+        allowedRecipients: list(process.env.WHATSAPP_ALLOWED_RECIPIENTS),
+        allowGroups: bool(process.env.WHATSAPP_ENABLE_GROUPS, false),
       },
       logLevel: (process.env.WHATSAPP_LOG_LEVEL ?? 'info') as WhatsAppConfig['logLevel'],
       defaultCountryCode: process.env.WHATSAPP_DEFAULT_COUNTRY_CODE ?? '55',
@@ -127,6 +147,23 @@ export class ConfigManager {
       );
     }
     return `${full}@s.whatsapp.net`;
+  }
+
+  validateRecipient(recipient: string): string {
+    const jid = this.normalizeJid(recipient);
+
+    if (jid.endsWith('@g.us') && !this.config.safety.allowGroups) {
+      throw new Error(
+        'Group sends are disabled by default. Set WHATSAPP_ENABLE_GROUPS=true to allow @g.us recipients.',
+      );
+    }
+
+    const allowlist = this.config.safety.allowedRecipients.map((item) => this.normalizeJid(item));
+    if (allowlist.length > 0 && !allowlist.includes(jid)) {
+      throw new Error('Recipient is not in WHATSAPP_ALLOWED_RECIPIENTS');
+    }
+
+    return jid;
   }
 
   isAllowedMimeType(mime: string): boolean {

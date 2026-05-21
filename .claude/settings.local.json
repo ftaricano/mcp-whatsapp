@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//Users/jarvis/.claude/skills/sharepoint-mcp-cpz/**)",
-      "Bash(mkdir -p /Users/jarvis/.claude/skills/whatsapp-mcp)"
-    ]
-  }
-}

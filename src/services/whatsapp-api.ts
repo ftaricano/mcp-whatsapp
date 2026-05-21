@@ -253,7 +253,7 @@ export class WhatsAppService {
 
   async sendMessage(params: SendMessageParams): Promise<SentMessage> {
     await this.ensureReady();
-    const jid = this.config.normalizeJid(params.to);
+    const jid = this.config.validateRecipient(params.to);
     validateText(params.message);
 
     return this.circuitBreaker.execute(() =>
@@ -269,7 +269,7 @@ export class WhatsAppService {
 
   async sendMediaMessage(params: SendMediaParams): Promise<SentMessage> {
     await this.ensureReady();
-    const jid = this.config.normalizeJid(params.to);
+    const jid = this.config.validateRecipient(params.to);
     const safePath = await this.validateMediaFile(params.mediaPath);
 
     const mimeType = (mime.lookup(safePath) || 'application/octet-stream').toString();

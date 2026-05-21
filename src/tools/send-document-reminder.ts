@@ -66,7 +66,6 @@ export async function handleSendDocumentReminder(
 
     if (data.attachment_path) {
       try {
-        const stat = await fs.stat(data.attachment_path);
         sent = await service.sendMediaMessage({
           to: data.to,
           mediaPath: data.attachment_path,
@@ -74,6 +73,7 @@ export async function handleSendDocumentReminder(
           caption: messageText.slice(0, 1024),
           filename: path.basename(data.attachment_path),
         });
+        const stat = await fs.stat(data.attachment_path);
         attachmentInfo = {
           filename: path.basename(data.attachment_path),
           size_mb: Number((stat.size / 1024 / 1024).toFixed(2)),

@@ -1,5 +1,5 @@
 {
-  "name": "mcp-whatsapp",
+  "name": "@ftaricano/mcp-whatsapp",
   "version": "2.1.0",
   "description": "WhatsApp integration via Baileys (QR-code auth). Ships a CLI (`whatsapp`) for on-demand send and an MCP server (`mcp-whatsapp`) for long-running integrations.",
   "type": "module",
@@ -18,11 +18,39 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "audit:ci": "npm audit --audit-level=high"
+    "audit:ci": "npm audit --audit-level=high --omit=dev",
+    "prepack": "npm run clean && npm run build"
   },
-  "keywords": ["mcp", "whatsapp", "baileys", "qr", "messaging"],
+  "files": [
+    "build/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    ".env.example"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "whatsapp",
+    "baileys",
+    "qr",
+    "cli",
+    "messaging",
+    "automation"
+  ],
   "author": "Fernando Taricano",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ftaricano/mcp-whatsapp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ftaricano/mcp-whatsapp/issues"
+  },
+  "homepage": "https://github.com/ftaricano/mcp-whatsapp#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
