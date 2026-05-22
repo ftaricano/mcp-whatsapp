@@ -120,6 +120,11 @@ async function readResource(uri: string, service: WhatsAppService): Promise<unkn
           max_size_mb: Math.round(cfg.media.maxSize / 1024 / 1024),
           allowed_mime_types: cfg.media.allowedMimeTypes,
         },
+        safety: {
+          allowed_recipients_configured: cfg.safety.allowedRecipients.length > 0,
+          allowed_recipient_count: cfg.safety.allowedRecipients.length,
+          groups_enabled: cfg.safety.allowGroups,
+        },
         log_level: cfg.logLevel,
         default_country_code: cfg.defaultCountryCode,
       };

@@ -1,6 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
-import * as os from 'os';
 
 /**
  * Cada teste reseta o módulo com `vi.resetModules()` e recria o singleton
@@ -103,13 +102,12 @@ describe('ConfigManager', () => {
   });
 
   describe('media.allowedDirs', () => {
-    it('defaults to HOME + CWD', async () => {
+    it('defaults to CWD only', async () => {
       const { ConfigManager, reset } = await freshConfig({});
       cleanupFns.push(reset);
       const cfg = ConfigManager.getInstance().getConfig();
-      const resolvedHome = path.resolve(os.homedir());
       const resolvedCwd = path.resolve(process.cwd());
-      expect(cfg.media.allowedDirs).toEqual(expect.arrayContaining([resolvedHome, resolvedCwd]));
+      expect(cfg.media.allowedDirs).toEqual([resolvedCwd]);
     });
 
     it('parses WHATSAPP_ALLOWED_DIRS as colon-separated list', async () => {
@@ -119,6 +117,39 @@ describe('ConfigManager', () => {
       cleanupFns.push(reset);
       const cfg = ConfigManager.getInstance().getConfig();
       expect(cfg.media.allowedDirs).toEqual(['/tmp/a', '/tmp/b']);
+    });
+  });
+
+  describe('validateRecipient', () => {
+    it('allows recipients when WHATSAPP_ALLOWED_RECIPIENTS is empty', async () => {
+      const { ConfigManager, reset } = await freshConfig({});
+      cleanupFns.push(reset);
+      const cfg = ConfigManager.getInstance();
+      expect(cfg.validateRecipient('+5521999999999')).toBe('5521999999999@s.whatsapp.net');
+    });
+
+    it('enforces WHATSAPP_ALLOWED_RECIPIENTS when configured', async () => {
+      const { ConfigManager, reset } = await freshConfig({
+        WHATSAPP_ALLOWED_RECIPIENTS: '+5521999999999,5521888888888@s.whatsapp.net',
+      });
+      cleanupFns.push(reset);
+      const cfg = ConfigManager.getInstance();
+      expect(cfg.validateRecipient('21999999999')).toBe('5521999999999@s.whatsapp.net');
+      expect(() => cfg.validateRecipient('5521777777777')).toThrow(/not in WHATSAPP_ALLOWED_RECIPIENTS/);
+    });
+
+    it('blocks group sends by default', async () => {
+      const { ConfigManager, reset } = await freshConfig({});
+      cleanupFns.push(reset);
+      const cfg = ConfigManager.getInstance();
+      expect(() => cfg.validateRecipient('120363000000000000@g.us')).toThrow(/Group sends are disabled/);
+    });
+
+    it('allows group sends only when WHATSAPP_ENABLE_GROUPS is true', async () => {
+      const { ConfigManager, reset } = await freshConfig({ WHATSAPP_ENABLE_GROUPS: 'true' });
+      cleanupFns.push(reset);
+      const cfg = ConfigManager.getInstance();
+      expect(cfg.validateRecipient('120363000000000000@g.us')).toBe('120363000000000000@g.us');
     });
   });
 });

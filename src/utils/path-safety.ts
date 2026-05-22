@@ -70,13 +70,13 @@ function isWithin(child: string, parent: string): boolean {
 
 /**
  * Parse WHATSAPP_ALLOWED_DIRS (colon-separated, tilde-expanded).
- * Defaults to [HOME, CWD] — ou seja: o CLI pode anexar qualquer coisa dentro
- * do home do usuário ou do diretório de onde foi invocado.
+ * Defaults to [CWD] so an MCP client cannot read arbitrary files from HOME
+ * unless the operator explicitly widens the allowlist.
  */
 export function parseAllowedDirs(envValue: string | undefined): string[] {
-  const home = os.homedir();
   const cwd = process.cwd();
-  if (!envValue) return [home, cwd].map((p) => path.resolve(p));
+  const home = os.homedir();
+  if (!envValue) return [cwd].map((p) => path.resolve(p));
   return envValue
     .split(':')
     .map((p) => p.trim())

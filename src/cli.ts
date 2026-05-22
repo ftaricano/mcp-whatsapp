@@ -40,8 +40,8 @@ Numbers: E.164 (+5521999999999) or digits (5521999999999). DDI default 55.
 
 Doc types (reminder --doc): rg | cpf | contrato | comprovante | custom
 Examples:
-  whatsapp send +5521995762574 "ping"
-  whatsapp billing +5521995762574 --amount 299.90 --due 2026-05-10 \\
+  whatsapp send +5521999999999 "ping"
+  whatsapp billing +5521999999999 --amount 299.90 --due 2026-05-10 \\
     --invoice BOL-42 --name "João" --link https://pay.ex/42 --company "CPZ Seguros"
 `;
 

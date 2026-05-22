@@ -33,5 +33,14 @@ coverage/
 # WhatsApp specific — NEVER commit the auth state
 .wwebjs_auth/
 auth-state/
+auth-state-*/
+baileys_store*.json
 session.json
+*.session
+*.session.json
+qr*.png
 tokens.json
+
+# Local agent/workspace state
+.claude/
+.codex/

@@ -5,11 +5,9 @@ import * as os from 'os';
 import { resolveSafePath, parseAllowedDirs } from '../src/utils/path-safety.js';
 
 describe('parseAllowedDirs', () => {
-  it('defaults to HOME + CWD when unset', () => {
+  it('defaults to CWD only when unset', () => {
     const dirs = parseAllowedDirs(undefined);
-    expect(dirs).toEqual(
-      expect.arrayContaining([path.resolve(os.homedir()), path.resolve(process.cwd())]),
-    );
+    expect(dirs).toEqual([path.resolve(process.cwd())]);
   });
 
   it('parses colon-separated list and trims whitespace', () => {
