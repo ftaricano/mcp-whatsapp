@@ -1,6 +1,6 @@
 # AGENTS.md -- mcp-whatsapp
 
-As regras operacionais deste repo sao canonicas em [CLAUDE.md](CLAUDE.md) (fonte unica para Claude/Codex/Hermes). Leia-o antes de tocar em codigo.
+As regras operacionais deste repo sao canonicas em [CLAUDE.md](CLAUDE.md) (fonte unica para Claude/Codex). Leia-o antes de tocar em codigo.
 
 TL;DR das invariantes:
 - `auth-state/` nunca commitado -- credenciais da sessao WhatsApp; leak exige logout + desconexao no celular
